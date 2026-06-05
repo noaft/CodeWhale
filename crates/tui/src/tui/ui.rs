@@ -1265,6 +1265,13 @@ async fn run_event_loop(
             app.needs_redraw = true;
         }
 
+        // Poll prompt suggestion cell from background generation task.
+        if let Ok(mut guard) = app.prompt_suggestion_cell.lock() {
+            if let Some(suggestion) = guard.take() {
+                app.prompt_suggestion = Some(suggestion);
+            }
+        }
+
         // First, poll for engine events (non-blocking)
         let mut received_engine_event = false;
         let mut transcript_batch_updated = false;
@@ -1618,6 +1625,7 @@ async fn run_event_loop(
                         app.is_loading = true;
                         app.offline_mode = false;
                         app.turn_error_posted = false;
+                        app.prompt_suggestion = None;
                         app.dispatch_started_at = None;
                         current_streaming_text.clear();
                         app.streaming_state.reset();
@@ -1816,6 +1824,38 @@ async fn run_event_loop(
                                 crate::tui::notifications::stop_title_animation();
                             } else {
                                 crate::tui::notifications::stop_title_animation_quietly();
+                            }
+                        }
+
+                        // Generate ghost-text follow-up suggestion asynchronously.
+                        if status == crate::core::events::TurnOutcomeStatus::Completed
+                            && app.api_messages.len() >= 2
+                        {
+                            let suggestion_cell = app.prompt_suggestion_cell.clone();
+                            let api_key = config.deepseek_api_key().unwrap_or_default();
+                            let base_url = config.deepseek_base_url();
+                            let model = config.default_model();
+                            let messages: Vec<crate::models::Message> =
+                                app.api_messages.clone();
+                            if !api_key.is_empty() {
+                                tokio::spawn(async move {
+                                    let summary =
+                                        crate::tui::prompt_suggestion::summarize_recent_messages(
+                                            &messages, 8,
+                                        );
+                                    if let Some(suggestion) =
+                                        crate::tui::prompt_suggestion::generate_suggestion(
+                                            &api_key,
+                                            &base_url,
+                                            &model,
+                                            &summary,
+                                        )
+                                        .await
+                                        && let Ok(mut guard) = suggestion_cell.lock()
+                                    {
+                                        *guard = Some(suggestion);
+                                    }
+                                });
                             }
                         }
 
@@ -3589,6 +3629,14 @@ async fn run_event_loop(
                         continue;
                     }
                     if app.is_loading && queue_current_draft_for_next_turn(app) {
+                        continue;
+                    }
+                    if app.input.is_empty()
+                        && let Some(suggestion) = app.prompt_suggestion.take()
+                    {
+                        app.input = suggestion;
+                        app.cursor_position = app.input.chars().count();
+                        app.needs_redraw = true;
                         continue;
                     }
                     let prior_model = app.model.clone();

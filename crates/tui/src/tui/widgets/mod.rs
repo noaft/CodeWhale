@@ -659,17 +659,24 @@ impl Renderable for ComposerWidget<'_> {
 
         let mut input_lines = Vec::new();
         if input_text.is_empty() {
-            let placeholder = if self.app.is_history_search_active() {
-                self.app
-                    .tr(crate::localization::MessageId::HistorySearchPlaceholder)
+            if let Some(ref suggestion) = self.app.prompt_suggestion {
+                input_lines.push(Line::from(Span::styled(
+                    suggestion.as_str(),
+                    Style::default().fg(palette::TEXT_HINT),
+                )));
             } else {
-                self.app
-                    .tr(crate::localization::MessageId::ComposerPlaceholder)
-            };
-            input_lines.push(Line::from(Span::styled(
-                placeholder,
-                Style::default().fg(palette::TEXT_MUTED).italic(),
-            )));
+                let placeholder = if self.app.is_history_search_active() {
+                    self.app
+                        .tr(crate::localization::MessageId::HistorySearchPlaceholder)
+                } else {
+                    self.app
+                        .tr(crate::localization::MessageId::ComposerPlaceholder)
+                };
+                input_lines.push(Line::from(Span::styled(
+                    placeholder,
+                    Style::default().fg(palette::TEXT_MUTED).italic(),
+                )));
+            }
         } else if let Some((sel_start, sel_end)) = self.app.selection_range() {
             let line_ranges: Vec<(usize, usize)> =
                 wrap_input_lines_for_mouse(&self.app.input, content_width)
@@ -704,12 +711,16 @@ impl Renderable for ComposerWidget<'_> {
         // wrap the single Line at render time, so we must estimate the wrapped
         // row count ourselves to keep padding accurate on narrow widths.
         let visual_rows = if input_text.is_empty() {
-            let placeholder = if self.app.is_history_search_active() {
+            let placeholder = if let Some(ref suggestion) = self.app.prompt_suggestion {
+                suggestion.as_str()
+            } else if self.app.is_history_search_active() {
                 self.app
                     .tr(crate::localization::MessageId::HistorySearchPlaceholder)
+                    .as_ref()
             } else {
                 self.app
                     .tr(crate::localization::MessageId::ComposerPlaceholder)
+                    .as_ref()
             };
             placeholder_visual_lines_for(placeholder, content_width)
         } else {
@@ -1009,12 +1020,16 @@ impl Renderable for ComposerWidget<'_> {
         let (visible_lines, cursor_row, cursor_col) =
             layout_input(input_text, input_cursor, content_width, input_rows_budget);
         let visual_rows = if input_text.is_empty() {
-            let placeholder = if self.app.is_history_search_active() {
+            let placeholder = if let Some(ref suggestion) = self.app.prompt_suggestion {
+                suggestion.as_str()
+            } else if self.app.is_history_search_active() {
                 self.app
                     .tr(crate::localization::MessageId::HistorySearchPlaceholder)
+                    .as_ref()
             } else {
                 self.app
                     .tr(crate::localization::MessageId::ComposerPlaceholder)
+                    .as_ref()
             };
             placeholder_visual_lines_for(placeholder, content_width)
         } else {
