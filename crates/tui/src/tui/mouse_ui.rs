@@ -390,9 +390,7 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
             if let Some(action) = sidebar_click_action(app, mouse) {
                 use crate::tui::views::CommandPaletteAction;
                 return vec![ViewEvent::CommandPaletteSelected {
-                    action: CommandPaletteAction::ExecuteCommand {
-                        command: action,
-                    },
+                    action: CommandPaletteAction::ExecuteCommand { command: action },
                 }];
             }
 
