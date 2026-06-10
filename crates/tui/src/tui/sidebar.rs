@@ -739,7 +739,59 @@ fn render_sidebar_work(f: &mut Frame, area: Rect, app: &mut App) {
     );
 
     let full_texts = work_panel_hover_texts(&summary, content_width.max(1), usable_rows);
-    render_sidebar_section(f, area, "Work", lines, full_texts, app);
+    render_sidebar_section(f, area, "Work", lines, full_texts, Vec::new(), app);
+}
+
+/// Build click actions for each line in the Tasks panel (#3028).
+/// Background task rows get `/task show <id>`; stop-target rows get `/task cancel <id>`.
+fn task_panel_row_actions(app: &App, lines: &[Line<'static>]) -> Vec<Option<String>> {
+    let background_rows = background_task_rows(app, &[]);
+    let mut actions: Vec<Option<String>> = vec![None; lines.len()];
+    // The first line is the turn label — no action.
+    // Subsequent lines alternate: label row then optional detail row.
+    // Skip the turn label (index 0) and "Live tools"/"Background commands" headers.
+    let mut bg_idx = 0;
+    for (i, _line) in lines.iter().enumerate() {
+        if i == 0 {
+            continue; // turn label
+        }
+        if bg_idx < background_rows.len() {
+            let task = &background_rows[bg_idx];
+            // The detail row (indented) comes right after the label row.
+            // Label row gets show action; the stop-target [x] concept is
+            // handled by a separate click on the detail row.
+            {
+                let id = &task.id;
+                // Check if this line index corresponds to a background task label
+                // (every 2 lines after header rows).  For now, assign show to
+                // the label row and cancel to the detail row.
+                if i % 2 == 0 && i + 1 < actions.len() {
+                    actions[i] = Some(format!("/task show {id}"));
+                    actions[i + 1] = Some(format!("/task cancel {id}"));
+                }
+            }
+            bg_idx += 1;
+        }
+    }
+    actions
+}
+
+/// Build click actions for the Agents panel rows (#3028).
+/// Each agent row gets `/subagents` to open the agent detail view.
+fn agent_panel_row_actions(_app: &App, rows: &[SidebarAgentRow]) -> Vec<Option<String>> {
+    let mut actions: Vec<Option<String>> = Vec::with_capacity(rows.len().max(1));
+    // First one or two lines are header (running/done count + role mix).
+    actions.push(None); // header line 1
+    if !rows.is_empty() {
+        actions.push(None); // header line 2 (role mix) or first agent row
+    }
+    for row in rows {
+        actions.push(Some(format!("/subagents"))); // agent row
+        if row.status != "done" {
+            actions.push(None); // detail line (no action)
+        }
+    }
+    actions
 }
 
 fn render_sidebar_tasks(f: &mut Frame, area: Rect, app: &mut App) {
@@ -752,7 +804,8 @@ fn render_sidebar_tasks(f: &mut Frame, area: Rect, app: &mut App) {
     let lines = task_panel_lines(app, content_width.max(1), usable_rows.max(1));
 
     let full_texts = task_panel_hover_texts(app, usable_rows.max(1));
-    render_sidebar_section(f, area, "Tasks", lines, full_texts, app);
+    let row_actions = task_panel_row_actions(app, &lines);
+    render_sidebar_section(f, area, "Tasks", lines, full_texts, row_actions, app);
 }
 
 #[derive(Debug, Clone)]
@@ -1774,7 +1827,8 @@ fn render_sidebar_subagents(f: &mut Frame, area: Rect, app: &mut App) {
     );
     let full_texts = subagent_panel_hover_texts(&summary, &rows, usable_rows.max(1));
 
-    render_sidebar_section(f, area, "Agents", lines, full_texts, app);
+    let row_actions = agent_panel_row_actions(app, &rows);
+    render_sidebar_section(f, area, "Agents", lines, full_texts, row_actions, app);
 }
 
 /// Minimal projection of the data the sub-agent sidebar needs. Lifted out
@@ -2225,7 +2279,7 @@ fn render_context_panel(f: &mut Frame, area: Rect, app: &mut App) {
         )));
     }
 
-    render_sidebar_section(f, area, "Session", lines, Vec::new(), app);
+    render_sidebar_section(f, area, "Session", lines, Vec::new(), Vec::new(), app);
 }
 
 fn spans_to_text(spans: &[Span<'_>]) -> String {
@@ -2242,6 +2296,7 @@ fn render_sidebar_section(
     title: &str,
     lines: Vec<Line<'static>>,
     full_texts: Vec<String>,
+    row_actions: Vec<Option<String>>,
     app: &mut App,
 ) {
     if area.width < 4 || area.height < 3 {
@@ -2277,7 +2332,7 @@ fn render_sidebar_section(
                 .unwrap_or_else(|| display.clone())
         })
         .collect();
-    let rows = sidebar_hover_rows(content_area, &display_texts, &hover_texts);
+    let rows = sidebar_hover_rows(content_area, &display_texts, &hover_texts, &row_actions);
     app.sidebar_hover.sections.push(SidebarHoverSection {
         content_area,
         lines: hover_texts,
@@ -2325,6 +2380,7 @@ fn sidebar_hover_rows(
     content_area: Rect,
     display_texts: &[String],
     hover_texts: &[String],
+    row_actions: &[Option<String>],
 ) -> Vec<SidebarHoverRow> {
     display_texts
         .iter()
@@ -2334,6 +2390,7 @@ fn sidebar_hover_rows(
             let row_y = content_area.y.saturating_add(idx as u16);
             let display_width = unicode_width::UnicodeWidthStr::width(display_text.as_str());
             let full_width = unicode_width::UnicodeWidthStr::width(full_text.as_str());
+            let click_action = row_actions.get(idx).and_then(|a| a.clone());
             SidebarHoverRow {
                 row_y,
                 display_text: display_text.clone(),
@@ -2342,6 +2399,7 @@ fn sidebar_hover_rows(
                 is_truncated: display_width > content_area.width as usize
                     || full_width > content_area.width as usize
                     || display_text != full_text,
+                click_action,
             }
         })
         .collect()

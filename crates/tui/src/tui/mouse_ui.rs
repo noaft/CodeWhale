@@ -384,6 +384,18 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
             app.viewport.transcript_scrollbar_dragging = false;
             app.viewport.selection_autoscroll = None;
 
+            // #3028: Check sidebar hover state for clickable rows before
+            // falling through to transcript selection.  Reuses the existing
+            // command-palette dispatch pipeline.
+            if let Some(action) = sidebar_click_action(app, mouse) {
+                use crate::tui::views::CommandPaletteAction;
+                return vec![ViewEvent::CommandPaletteSelected {
+                    action: CommandPaletteAction::ExecuteCommand {
+                        command: action,
+                    },
+                }];
+            }
+
             // Click on the transcript scrollbar gutter starts a scrollbar
             // drag so the visible thumb remains interactive for users who
             // prefer mouse-based navigation.
@@ -448,6 +460,31 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     }
 
     Vec::new()
+}
+
+/// Resolve a left-click in the sidebar to a slash command, if the clicked
+/// row has a click_action assigned (#3028).
+fn sidebar_click_action(app: &App, mouse: MouseEvent) -> Option<String> {
+    for section in &app.sidebar_hover.sections {
+        if mouse.column >= section.content_area.x
+            && mouse.column
+                < section
+                    .content_area
+                    .x
+                    .saturating_add(section.content_area.width)
+            && mouse.row >= section.content_area.y
+            && mouse.row
+                < section
+                    .content_area
+                    .y
+                    .saturating_add(section.content_area.height)
+        {
+            if let Some(row) = section.rows.iter().find(|row| row.row_y == mouse.row) {
+                return row.click_action.clone();
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn mouse_hits_transcript_scrollbar(app: &App, mouse: MouseEvent) -> bool {
