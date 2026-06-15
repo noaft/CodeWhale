@@ -31,6 +31,9 @@ notes, and relevant issue/PR comments.
 <summary><strong>Forward track — recent v0.9 work (newest)</strong></summary>
 
 
+- **[greyfreedom](https://github.com/greyfreedom)** — atomic ask-only
+  permission-rule persistence so an execution-policy rule survives the write
+  that triggered the prompt (#3233)
 - **[xyuai](https://github.com/xyuai)** — canonical CodeWhale settings path,
   provider persistence, provider picker, logout-scope, and MiMo auth cleanup
   work (#2730, #2714, #2715, #2717, #2718)
@@ -214,6 +217,38 @@ credit: **[@buko](https://github.com/buko)**, **[@yyyCode](https://github.com/yy
 **[@PurplePulse](https://github.com/PurplePulse)**, and **[@nbiish](https://github.com/nbiish)**.
 
 ---
+
+</details>
+
+<details>
+<summary><strong>Reconciled credits — earlier contributors restored to the record</strong></summary>
+
+A credit-reconciliation pass mapped every shipped commit author to a GitHub
+handle and found these contributors whose merged work was not yet listed here or
+in the changelog. Restoring them with thanks — every one shipped real code.
+
+- **[MoriTang](https://github.com/MoriTang)** — account balance status-bar item, with a request timeout, reused HTTP client, stale-balance-on-failure handling, and DeepSeek-gated display
+- **[mars-base](https://github.com/mars-base)** — session title shown in the composer border and `gh` discovery across common install paths (#836)
+- **[Giggitycountless](https://github.com/Giggitycountless)** — auto-add `.deepseek/` to `.gitignore`, gitignore-check robustness, and `/clear` resetting the Todos panel
+- **[Inference1](https://github.com/Inference1)** — vLLM provider support and README pricing/structure clarity (#737, #776)
+- **[membphis](https://github.com/membphis)** — bordered Markdown table rendering and Shift+Enter newline in the composer (#801)
+- **[JasonOA888](https://github.com/JasonOA888)** — `web_run` network-policy enforcement and refusing to snapshot `$HOME` (#798, #800)
+- **[tuohai666](https://github.com/tuohai666)** — recursive skills-directory reading plus hook-dispatch and approval-branch test coverage (#811)
+- **[xuezhaoyu](https://github.com/xuezhaoyu)** — DEC 2026 synchronized-update flicker fix for GPU terminals, guaranteeing `END_SYNC_UPDATE` even when a draw fails
+- **[manaskarra](https://github.com/manaskarra)** — global `~/.deepseek/AGENTS.md` fallback loading (#1157)
+- **[gerryqi](https://github.com/gerryqi)** — wrap fire-and-forget `spawn_blocking` calls with a panic dump (#810)
+- **[ccomma](https://github.com/ccomma)** — skip snapshots for dangerous workspaces (#804)
+- **[AGSaturn](https://github.com/AGSaturn)** — preserve requested model-ID casing in registry resolution (#733)
+- **[wucm667](https://github.com/wucm667)** — accept provider-prefixed DeepSeek model IDs (#794)
+- **[quentin-lian](https://github.com/quentin-lian)** — portable-pty 0.9 upgrade for LoongArch64 support (#1992)
+- **[Beltran12138](https://github.com/Beltran12138)** — treat `deepseek-chat` / `deepseek-reasoner` aliases as reasoning models
+- **[chuntseevolving](https://github.com/chuntseevolving)** — send `TurnStarted` before snapshot to prevent WSL2 timeout
+- **[lawrencewzen](https://github.com/lawrencewzen)** — preserve UTF-8 while stripping ANSI
+- **[hhhaiai](https://github.com/hhhaiai)** — keep workspace skills visible when the prompt budget truncates
+- **[khalid-hungerstation](https://github.com/khalid-hungerstation)** — bundle the delegate skill alongside skill-creator
+- **[Anyexyz](https://github.com/Anyexyz)** — GitHub Actions workflow to sync with the CNB repo
+- **[nightfallsad](https://github.com/nightfallsad)** — clearer `/continue` hint copy
+- **[zxyasfas](https://github.com/zxyasfas)** — align Rust MSRV references with the workspace (#739)
 
 </details>
 

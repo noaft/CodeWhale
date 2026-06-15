@@ -74,7 +74,7 @@ brew tap Hmbown/deepseek-tui && brew install deepseek-tui
         Yes. CodeWhale is the new name for what was previously called DeepSeek TUI.
         The canonical command is now <code className="inline">codewhale</code>. Legacy <code className="inline">deepseek</code> and <code className="inline">deepseek-tui</code> commands remain as compatibility shims — they still work.
         Config lives at <code className="inline">~/.codewhale/</code>. Legacy <code className="inline">~/.deepseek/</code> config is still read as a compatibility fallback, and <code className="inline">DEEPSEEK_*</code> env vars continue to work.
-        DeepSeek is not deprecated. The rename reflects CodeWhale's broader mission as the agentic terminal for open models across providers, not a narrowing away from DeepSeek.
+        DeepSeek is not deprecated. The rename reflects a mission idea put in this version: CodeWhale as an agentic terminal for open models across providers, not a narrowing away from DeepSeek.
       </>
     ),
     sources: ["docs/REBRAND.md", "README.md"],

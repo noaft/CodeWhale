@@ -3305,10 +3305,11 @@ fn turn_liveness_does_not_abort_running_tool() {
 #[test]
 fn turn_liveness_does_not_abort_running_tool_with_recent_heartbeat() {
     let mut app = create_test_app();
-    let now = Instant::now();
+    let started_at = Instant::now();
+    let now = started_at + TOOL_HANG_WATCHDOG_TIMEOUT + Duration::from_secs(30);
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
-    app.turn_started_at = Some(now - TOOL_HANG_WATCHDOG_TIMEOUT - Duration::from_secs(30));
+    app.turn_started_at = Some(started_at);
     app.turn_last_activity_at = Some(now - Duration::from_secs(10));
     let mut active = ActiveCell::new();
     active.push_tool(
@@ -3337,11 +3338,12 @@ fn turn_liveness_does_not_abort_running_tool_with_recent_heartbeat() {
 #[test]
 fn turn_liveness_recovers_running_tool_without_heartbeat() {
     let mut app = create_test_app();
-    let now = Instant::now();
+    let started_at = Instant::now();
+    let now = started_at + TOOL_HANG_WATCHDOG_TIMEOUT + Duration::from_secs(1);
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
     app.runtime_turn_id = Some("stale-tool-turn".to_string());
-    app.turn_started_at = Some(now - TOOL_HANG_WATCHDOG_TIMEOUT - Duration::from_secs(1));
+    app.turn_started_at = Some(started_at);
     app.turn_last_activity_at = app.turn_started_at;
     app.user_scrolled_during_stream = true;
     let mut active = ActiveCell::new();
@@ -3978,7 +3980,9 @@ fn reconcile_subagent_activity_state_trims_stale_progress_and_sets_anchor() {
 #[test]
 fn reconcile_subagent_activity_state_expires_terminal_cards_but_keeps_running() {
     let mut app = create_test_app();
-    let now = Instant::now();
+    let old_seen_at = Instant::now();
+    let now = old_seen_at + Duration::from_secs(10 * 60);
+    let recent_seen_at = now - Duration::from_secs(30);
     app.subagent_cache = vec![
         make_subagent(
             "agent_running",
@@ -3993,14 +3997,10 @@ fn reconcile_subagent_activity_state_expires_terminal_cards_but_keeps_running() 
             crate::tools::subagent::SubAgentStatus::Failed("boom".to_string()),
         ),
     ];
-    app.subagent_terminal_seen_at.insert(
-        "agent_old".to_string(),
-        now.checked_sub(Duration::from_secs(10 * 60)).unwrap(),
-    );
-    app.subagent_terminal_seen_at.insert(
-        "agent_recent".to_string(),
-        now.checked_sub(Duration::from_secs(30)).unwrap(),
-    );
+    app.subagent_terminal_seen_at
+        .insert("agent_old".to_string(), old_seen_at);
+    app.subagent_terminal_seen_at
+        .insert("agent_recent".to_string(), recent_seen_at);
 
     reconcile_subagent_activity_state_at(&mut app, now);
 
@@ -4019,7 +4019,8 @@ fn reconcile_subagent_activity_state_expires_terminal_cards_but_keeps_running() 
 #[test]
 fn reconcile_subagent_activity_state_caps_terminal_card_bursts() {
     let mut app = create_test_app();
-    let now = Instant::now();
+    let oldest_seen_at = Instant::now();
+    let now = oldest_seen_at + Duration::from_secs(30);
     for idx in 0..30 {
         let id = format!("agent_{idx:02}");
         app.subagent_cache.push(make_subagent(
@@ -4027,7 +4028,7 @@ fn reconcile_subagent_activity_state_caps_terminal_card_bursts() {
             crate::tools::subagent::SubAgentStatus::Completed,
         ));
         app.subagent_terminal_seen_at
-            .insert(id, now.checked_sub(Duration::from_secs(idx)).unwrap());
+            .insert(id, now - Duration::from_secs(idx));
     }
 
     reconcile_subagent_activity_state_at(&mut app, now);

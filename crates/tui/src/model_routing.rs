@@ -964,6 +964,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn inventory_auto_route_resolves_active_authenticated_provider() {
         let _env_lock = crate::test_support::lock_test_env();
         let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");

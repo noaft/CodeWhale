@@ -1815,11 +1815,16 @@ impl UpdateConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
     pub provider: Option<String>,
+    #[serde(alias = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(alias = "baseUrl")]
     pub base_url: Option<String>,
     /// Optional extra HTTP headers sent to model API requests.
+    #[serde(alias = "httpHeaders")]
     pub http_headers: Option<HashMap<String, String>>,
+    #[serde(alias = "defaultTextModel")]
     pub default_text_model: Option<String>,
+    #[serde(alias = "authMode")]
     pub auth_mode: Option<String>,
     /// DeepSeek reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
     /// Defaults to `"max"` at runtime if unset.
@@ -1850,27 +1855,36 @@ pub struct Config {
     /// Opt-in ghost-text follow-up prompt suggestion after each completed turn.
     /// Default: false — the user must explicitly set this to true to enable.
     pub prompt_suggestion: Option<bool>,
+    #[serde(alias = "approvalPolicy")]
     pub approval_policy: Option<String>,
+    #[serde(alias = "sandboxMode")]
     pub sandbox_mode: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "fallbackProviders")]
     pub fallback_providers: Vec<codewhale_config::ProviderKind>,
     pub yolo: Option<bool>,
     pub verbosity: Option<String>,
     /// External sandbox backend: `"none"` or `"opensandbox"`.
     /// When set, exec_shell routes commands through the backend's HTTP API
     /// instead of spawning a local process.
+    #[serde(alias = "sandboxBackend")]
     pub sandbox_backend: Option<String>,
     /// Base URL for the external sandbox backend (default: `"http://localhost:8080"`).
+    #[serde(alias = "sandboxUrl")]
     pub sandbox_url: Option<String>,
     /// Optional API key for the external sandbox backend (sent as Bearer token).
+    #[serde(alias = "sandboxApiKey")]
     pub sandbox_api_key: Option<String>,
     /// When true and `/usr/bin/bwrap` is present on Linux, route exec_shell
     /// through bubblewrap instead of relying solely on Landlock (#2184).
     /// Defaults to false. Requires the `bubblewrap` package to be installed
     /// separately — we do NOT vendor bwrap.
+    #[serde(alias = "preferBwrap")]
     pub prefer_bwrap: Option<bool>,
+    #[serde(alias = "managedConfigPath")]
     pub managed_config_path: Option<String>,
+    #[serde(alias = "requirementsPath")]
     pub requirements_path: Option<String>,
+    #[serde(alias = "maxSubagents")]
     pub max_subagents: Option<usize>,
     pub retry: Option<RetryConfig>,
     pub capacity: Option<CapacityConfig>,
@@ -2165,13 +2179,19 @@ impl LspConfigToml {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProviderConfig {
+    #[serde(alias = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(alias = "baseUrl")]
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub mode: Option<String>,
+    #[serde(alias = "authMode")]
     pub auth_mode: Option<String>,
+    #[serde(alias = "insecureSkipTlsVerify")]
     pub insecure_skip_tls_verify: Option<bool>,
+    #[serde(alias = "httpHeaders")]
     pub http_headers: Option<HashMap<String, String>>,
+    #[serde(alias = "pathSuffix")]
     pub path_suffix: Option<String>,
 }
 
@@ -2179,21 +2199,27 @@ pub struct ProviderConfig {
 pub struct ProvidersConfig {
     #[serde(default)]
     pub deepseek: ProviderConfig,
-    #[serde(default)]
+    #[serde(default, alias = "deepseekCn")]
     pub deepseek_cn: ProviderConfig,
-    #[serde(default)]
+    #[serde(default, alias = "nvidiaNim")]
     pub nvidia_nim: ProviderConfig,
     #[serde(default)]
     pub openai: ProviderConfig,
     #[serde(default)]
     pub atlascloud: ProviderConfig,
-    #[serde(default)]
+    #[serde(default, alias = "wanjieArk")]
     pub wanjie_ark: ProviderConfig,
     #[serde(default)]
     pub volcengine: ProviderConfig,
     #[serde(default)]
     pub openrouter: ProviderConfig,
-    #[serde(default, alias = "xiaomi", alias = "mimo", alias = "xiaomimimo")]
+    #[serde(
+        default,
+        alias = "xiaomi",
+        alias = "mimo",
+        alias = "xiaomimimo",
+        alias = "xiaomiMimo"
+    )]
     pub xiaomi_mimo: ProviderConfig,
     #[serde(default)]
     pub novita: ProviderConfig,
@@ -2201,7 +2227,12 @@ pub struct ProvidersConfig {
     pub fireworks: ProviderConfig,
     #[serde(default)]
     pub siliconflow: ProviderConfig,
-    #[serde(default, alias = "siliconflow-CN", alias = "siliconflow-cn")]
+    #[serde(
+        default,
+        alias = "siliconflow-CN",
+        alias = "siliconflow-cn",
+        alias = "siliconflowCn"
+    )]
     pub siliconflow_cn: ProviderConfig,
     #[serde(default)]
     pub arcee: ProviderConfig,
@@ -2217,7 +2248,13 @@ pub struct ProvidersConfig {
     pub huggingface: ProviderConfig,
     #[serde(default, alias = "together-ai")]
     pub together: ProviderConfig,
-    #[serde(default, alias = "openai-codex", alias = "codex", alias = "chatgpt")]
+    #[serde(
+        default,
+        alias = "openai-codex",
+        alias = "openaiCodex",
+        alias = "codex",
+        alias = "chatgpt"
+    )]
     pub openai_codex: ProviderConfig,
     #[serde(default, alias = "claude")]
     pub anthropic: ProviderConfig,
@@ -3457,6 +3494,13 @@ fn default_config_path() -> Option<PathBuf> {
     env_config_path().or_else(home_config_path)
 }
 
+fn codewhale_home_dir() -> Option<PathBuf> {
+    std::env::var_os("CODEWHALE_HOME").and_then(|path| {
+        let path = PathBuf::from(path);
+        (!path.as_os_str().is_empty()).then_some(path)
+    })
+}
+
 pub(crate) fn effective_home_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("HOME") {
         let path = PathBuf::from(path);
@@ -3489,6 +3533,10 @@ pub(crate) fn effective_home_dir() -> Option<PathBuf> {
 }
 
 fn home_config_path() -> Option<PathBuf> {
+    if let Some(home) = codewhale_home_dir() {
+        return Some(home.join("config.toml"));
+    }
+
     effective_home_dir().map(|home| {
         let primary = home.join(".codewhale").join("config.toml");
         if primary.exists() {
@@ -3505,6 +3553,10 @@ fn home_config_path() -> Option<PathBuf> {
 pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
     if let Some(path) = env_config_path() {
         return vec![path];
+    }
+
+    if let Some(codewhale_home) = codewhale_home_dir() {
+        return vec![codewhale_home.join("config.toml")];
     }
 
     let Some(home) = effective_home_dir() else {
@@ -6363,6 +6415,82 @@ mod tests {
         // A parsed config from the correct placement actually enables shell.
         let parsed: ConfigFile = toml::from_str(ok).expect("parse top-level config");
         assert!(parsed.base.allow_shell());
+    }
+
+    #[test]
+    fn load_honors_codewhale_home_for_primary_config_path() -> Result<()> {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let codewhale_home = dir.path().join("isolated-codewhale");
+        fs::create_dir_all(&codewhale_home)?;
+        fs::write(codewhale_home.join("config.toml"), "provider = \"zai\"\n")?;
+        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+        let expected = codewhale_home.join("config.toml");
+        assert_eq!(default_config_path().as_deref(), Some(expected.as_path()));
+        let config = Config::load(None, None)?;
+
+        assert_eq!(config.provider.as_deref(), Some("zai"));
+        Ok(())
+    }
+
+    #[test]
+    fn load_accepts_dispatcher_written_camel_case_config_shape() -> Result<()> {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let codewhale_home = dir.path().join("isolated-codewhale");
+        fs::create_dir_all(&codewhale_home)?;
+        fs::write(
+            codewhale_home.join("config.toml"),
+            r#"
+provider = "zai"
+fallbackProviders = []
+apiKey = "deepseek-test-key"
+defaultTextModel = "deepseek-v4-pro"
+authMode = "api_key"
+
+[providers.zai]
+apiKey = "zai-test-key"
+authMode = "api_key"
+
+[providers.zai.httpHeaders]
+
+[providers.xiaomiMimo]
+baseUrl = "https://token-plan-sgp.xiaomimimo.com/v1"
+
+[features.enabled]
+shell_tool = true
+subagents = true
+web_search = true
+"#,
+        )?;
+        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+        let config = Config::load(None, None)?;
+
+        assert_eq!(config.provider.as_deref(), Some("zai"));
+        assert_eq!(config.api_key.as_deref(), Some("deepseek-test-key"));
+        assert_eq!(
+            config.default_text_model.as_deref(),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(config.auth_mode.as_deref(), Some("api_key"));
+        let providers = config.providers.as_ref().expect("provider table");
+        assert_eq!(providers.zai.api_key.as_deref(), Some("zai-test-key"));
+        assert_eq!(providers.zai.auth_mode.as_deref(), Some("api_key"));
+        assert_eq!(
+            providers.xiaomi_mimo.base_url.as_deref(),
+            Some("https://token-plan-sgp.xiaomimimo.com/v1")
+        );
+        let features = config.features();
+        assert!(features.enabled(crate::features::Feature::ShellTool));
+        assert!(features.enabled(crate::features::Feature::Subagents));
+        assert!(features.enabled(crate::features::Feature::WebSearch));
+        Ok(())
     }
 
     #[test]
