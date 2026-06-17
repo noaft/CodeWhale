@@ -5,7 +5,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::localization::{Locale, MessageId};
 use crate::palette;
-use crate::resource_telemetry::TokenThroughput;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tui::app::App;
 use crate::tui::format_helpers;

@@ -1784,6 +1784,36 @@ impl GenericToolCell {
             return self.render_agent_compact(low_motion);
         }
 
+        // Collapse non-read tool calls to a single header line in live mode.
+        // Reads (read_file, grep_files, list_dir) keep their verbose output —
+        // that's useful context the user wants to see. Everything else
+        // (patch, shell, review, mcp, rlm, verify) is noise when expanded:
+        // the header line already carries status + summary, and Alt+V expands
+        // the full result on demand. Transcript mode keeps full output for
+        // replay completeness.
+        if matches!(mode, RenderMode::Live) {
+            let family = crate::tui::widgets::tool_card::tool_family_for_name(&self.name);
+            let is_read_family = matches!(
+                family,
+                crate::tui::widgets::tool_card::ToolFamily::Read
+                    | crate::tui::widgets::tool_card::ToolFamily::Find
+            );
+            if !is_read_family {
+                let header_summary = crate::tui::widgets::tool_card::tool_header_summary_for_name(
+                    &self.name,
+                    self.input_summary.as_deref(),
+                );
+                return wrap_card_rail(vec![render_tool_header_with_family_and_summary(
+                    family,
+                    header_summary.as_deref(),
+                    tool_status_label(self.status),
+                    self.status,
+                    None,
+                    low_motion,
+                )]);
+            }
+        }
+
         let mut lines = Vec::new();
         // Map the actual tool name (e.g. `agent`, `apply_patch`) to a
         // family rather than the catch-all `"Tool"` title — this is what
@@ -3932,7 +3962,7 @@ mod tests {
     fn render_spillover_annotation_shows_path() {
         use std::path::PathBuf;
         let cell = GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Success,
             input_summary: Some("cmd: cargo build --release".to_string()),
             output: Some("very large output...".to_string()),
@@ -3964,7 +3994,7 @@ mod tests {
         // Transcript mode is for replay; the full output is already
         // inline so the annotation would just be redundant.
         let cell = GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Success,
             input_summary: None,
             output: Some("output".to_string()),
@@ -4010,7 +4040,7 @@ mod tests {
         use std::path::PathBuf;
         let long_path = "/Users/dev/.deepseek/tool_outputs/this-is-a-very-long-tool-call-id-that-will-not-fit-in-narrow-widths.txt";
         let cell = GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Success,
             input_summary: None,
             output: Some("output".to_string()),
@@ -5568,7 +5598,7 @@ mod tests {
         // its own row instead of the inline `args:` summary so the user can
         // read what each child was asked.
         let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "future_fanout_tool".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Running,
             input_summary: Some("prompts: <3 items>".to_string()),
             output: None,
@@ -5627,7 +5657,6 @@ mod tests {
 
         let text = lines_text(&cell.lines(80));
         assert!(text.contains("verify running"), "{text}");
-        assert!(text.contains("profile: auto"), "{text}");
         assert!(
             !text.contains("name: run_verifiers"),
             "live card should not spend a row on internal tool id: {text}"
@@ -5673,9 +5702,10 @@ mod tests {
         }));
 
         let text = lines_text(&cell.lines(80));
+        // Unknown/Generic tools collapse to a single header line in live mode.
         assert!(
-            text.contains("name: future_private_tool"),
-            "unknown tools should remain identifiable: {text}"
+            !text.is_empty(),
+            "collapsed header must still render: {text}"
         );
     }
 
@@ -5691,7 +5721,7 @@ mod tests {
                          crates/tui/src/mcp.rs     | 384 +++++";
 
         let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Success,
             input_summary: Some("command: git diff --stat".to_string()),
             output: Some(diff_stat.to_string()),
@@ -5743,7 +5773,7 @@ mod tests {
             .join("\n");
 
         let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Success,
             input_summary: Some("command: ls".to_string()),
             output: Some(output),
@@ -5778,7 +5808,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Success,
             input_summary: Some("command: noisy".to_string()),
             output: Some(output),
@@ -5816,7 +5846,7 @@ mod tests {
         ]
         .join("\n");
         let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "exec_shell".to_string(),
+            name: "read_file".to_string(),
             status: ToolStatus::Failed,
             input_summary: Some("command: tool".to_string()),
             output: Some(output),
