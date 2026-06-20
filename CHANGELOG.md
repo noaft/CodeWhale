@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   growing while old data is preserved. The read resolver still finds legacy data
   for backfill until each subdir migrates. Reported on Windows where both trees
   were being created.
+- **State subdir validation on Windows (#3240).** State path hardening now
+  rejects rooted/prefixed subdir strings such as `/etc` before resolving or
+  migrating state directories, keeping the `.codewhale` write resolver inside
+  its state root across platforms.
 
 ## [0.8.62] - 2026-06-17
 

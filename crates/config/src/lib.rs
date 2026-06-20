@@ -3219,6 +3219,14 @@ fn ensure_safe_state_subdir(subdir: &str) -> Result<()> {
     if path.is_absolute() {
         bail!("state subdir must not be an absolute path: {subdir}");
     }
+    if path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::RootDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        bail!("state subdir must not contain a root or prefix: {subdir}");
+    }
     if path
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
