@@ -1148,6 +1148,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         launch_concurrency: config.launch_concurrency_for_provider(provider),
         subagents_enabled: config.subagents_enabled_for_provider(provider),
         features: config.features(),
+        auto_review_policy: config.auto_review_policy(),
         compaction: app.compaction_config(),
         todos: app.todos.clone(),
         plan_state: app.plan_state.clone(),

@@ -2421,6 +2421,7 @@ impl RuntimeThreadManager {
             launch_concurrency: self.config.launch_concurrency_for_provider(provider),
             subagents_enabled: self.config.subagents_enabled_for_provider(provider),
             features: self.config.features(),
+            auto_review_policy: self.config.auto_review_policy(),
             compaction,
             todos: new_shared_todo_list(),
             plan_state: new_shared_plan_state(),

@@ -298,6 +298,7 @@ fn ask_rule_engine(command: &str) -> codewhale_execpolicy::ExecPolicyEngine {
 #[test]
 fn auto_review_policy_forces_prompt_for_publish_like_actions() {
     let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
         "git_push",
         &json!({"remote": "origin", "branch": "main"}),
         crate::tui::auto_review::RunOrigin::Interactive,
@@ -321,6 +322,7 @@ fn auto_review_policy_forces_prompt_for_publish_like_actions() {
 #[test]
 fn auto_review_policy_blocks_hold_when_approval_is_never() {
     let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
         "github_publish_release",
         &json!({"tag": "v0.8.64"}),
         crate::tui::auto_review::RunOrigin::Interactive,
@@ -344,6 +346,7 @@ fn auto_review_policy_blocks_hold_when_approval_is_never() {
 #[test]
 fn auto_review_policy_does_not_change_generic_destructive_auto_approval_yet() {
     let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
@@ -373,6 +376,7 @@ fn auto_review_run_origin_marks_detached_tools_as_background() {
 #[test]
 fn auto_review_policy_holds_background_destructive_auto_approval() {
     let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
         &json!({"command": "cargo test", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
@@ -396,6 +400,7 @@ fn auto_review_policy_holds_background_destructive_auto_approval() {
 #[test]
 fn auto_review_policy_blocks_background_hold_when_approval_is_never() {
     let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
         &json!({"command": "cargo test", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
@@ -414,6 +419,41 @@ fn auto_review_policy_blocks_background_hold_when_approval_is_never() {
     );
     assert_eq!(audit["approval_mode"], "NEVER");
     assert_eq!(audit["run_origin"], "background");
+}
+
+#[test]
+fn auto_review_plan_decision_uses_configured_policy() {
+    let policy = crate::tui::auto_review::AutoReviewPolicy {
+        block_rules: vec![
+            crate::tui::auto_review::AutoReviewRule::block(
+                "configured-shell-block",
+                "shell requires maintainer review",
+            )
+            .action_kind(crate::tui::auto_review::ToolActionKind::Shell),
+        ],
+        ..Default::default()
+    };
+
+    let (decision, audit) = auto_review_plan_decision(
+        &policy,
+        "exec_shell",
+        &json!({"command": "cargo test"}),
+        crate::tui::auto_review::RunOrigin::Interactive,
+        crate::tui::approval::ApprovalMode::Auto,
+        Some("run tests"),
+        true,
+        false,
+    );
+
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::Block(
+            "Auto-review policy blocked tool 'exec_shell': shell requires maintainer review"
+                .to_string()
+        )
+    );
+    assert_eq!(audit["decision"], "block");
+    assert_eq!(audit["rule_id"], "configured-shell-block");
 }
 
 #[test]

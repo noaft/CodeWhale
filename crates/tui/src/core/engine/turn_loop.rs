@@ -1607,6 +1607,7 @@ impl Engine {
 
                 if blocked_error.is_none() {
                     let (decision, audit_event) = auto_review_plan_decision(
+                        &self.config.auto_review_policy,
                         &tool_name,
                         &tool_input,
                         auto_review_run_origin_for_plan(detached_start),

@@ -5997,6 +5997,7 @@ async fn run_exec_agent(
         launch_concurrency: execution_config.launch_concurrency_for_provider(effective_provider),
         subagents_enabled: execution_config.subagents_enabled_for_provider(effective_provider),
         features: execution_config.features(),
+        auto_review_policy: execution_config.auto_review_policy(),
         compaction,
         todos: new_shared_todo_list(),
         plan_state: new_shared_plan_state(),

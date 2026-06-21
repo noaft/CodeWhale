@@ -287,6 +287,8 @@ pub struct EngineConfig {
     pub subagents_enabled: bool,
     /// Feature flags controlling tool availability.
     pub features: Features,
+    /// Deterministic auto-review policy for tool calls.
+    pub auto_review_policy: crate::tui::auto_review::AutoReviewPolicy,
     /// Auto-compaction settings for long conversations.
     pub compaction: CompactionConfig,
     /// Shared Todo list state.
@@ -415,6 +417,7 @@ impl Default for EngineConfig {
             launch_concurrency: DEFAULT_MAX_SUBAGENTS,
             subagents_enabled: true,
             features: Features::with_defaults(),
+            auto_review_policy: crate::tui::auto_review::AutoReviewPolicy::default(),
             compaction: CompactionConfig::default(),
             todos: new_shared_todo_list(),
             plan_state: new_shared_plan_state(),
@@ -3341,6 +3344,7 @@ pub(super) fn auto_review_run_origin_for_plan(
 }
 
 pub(super) fn auto_review_plan_decision(
+    policy: &crate::tui::auto_review::AutoReviewPolicy,
     tool_name: &str,
     tool_input: &Value,
     run_origin: crate::tui::auto_review::RunOrigin,
@@ -3349,7 +3353,6 @@ pub(super) fn auto_review_plan_decision(
     workspace_trusted: bool,
     dirty_worktree: bool,
 ) -> (AutoReviewPlanDecision, Value) {
-    let policy = crate::tui::auto_review::AutoReviewPolicy::default();
     let context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
         tool_name,
         tool_input,
