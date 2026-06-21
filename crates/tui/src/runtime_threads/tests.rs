@@ -151,6 +151,45 @@ fn store_load_thread_rejects_newer_schema_version() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn store_open_rejects_symlinked_state_file() {
+    let dir = test_runtime_dir();
+    std::fs::create_dir_all(&dir).expect("mkdir runtime dir");
+    let target = dir.join("outside-state.json");
+    let link = dir.join("state.json");
+    std::fs::write(
+        &target,
+        serde_json::to_string(&RuntimeStoreState::default()).unwrap(),
+    )
+    .expect("write target");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink state");
+
+    let err = RuntimeThreadStore::open(dir.clone()).expect_err("symlink state should fail");
+    assert!(format!("{err:#}").contains("must not be a symlink"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn store_list_items_rejects_symlinked_item_file() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let item = sample_item("turn_link", "item_link", TurnItemLifecycleStatus::Completed);
+    let target = dir.join("outside-item.json");
+    let link = store.items_dir.join(format!("{}.json", item.id));
+    std::fs::write(&target, serde_json::to_string(&item).unwrap()).expect("write target");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink item");
+
+    let err = store
+        .list_items_for_turn(&item.turn_id)
+        .expect_err("symlink item should fail");
+    assert!(format!("{err:#}").contains("must not be a symlink"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn store_load_thread_defaults_missing_session_id() {
     let dir = test_runtime_dir();

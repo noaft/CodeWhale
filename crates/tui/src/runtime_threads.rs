@@ -261,9 +261,9 @@ impl RuntimeThreadStore {
             .with_context(|| format!("Failed to create {}", events_dir.display()))?;
 
         let state_path = root.join("state.json");
+        reject_symlinked_store_file(&state_path)?;
         let state = if state_path.exists() {
-            let raw = fs::read_to_string(&state_path)
-                .with_context(|| format!("Failed to read {}", state_path.display()))?;
+            let raw = read_store_file(&state_path)?;
             serde_json::from_str::<RuntimeStoreState>(&raw)
                 .with_context(|| format!("Failed to parse {}", state_path.display()))?
         } else {
@@ -319,7 +319,7 @@ impl RuntimeThreadStore {
 
     pub fn load_thread(&self, thread_id: &str) -> Result<ThreadRecord> {
         let path = self.thread_path(thread_id)?;
-        let raw = fs::read_to_string(&path)
+        let raw = read_store_file(&path)
             .with_context(|| format!("Failed to read thread {}", path.display()))?;
         let record: ThreadRecord = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse thread {}", path.display()))?;
@@ -335,7 +335,7 @@ impl RuntimeThreadStore {
 
     pub fn load_turn(&self, turn_id: &str) -> Result<TurnRecord> {
         let path = self.turn_path(turn_id)?;
-        let raw = fs::read_to_string(&path)
+        let raw = read_store_file(&path)
             .with_context(|| format!("Failed to read turn {}", path.display()))?;
         let record: TurnRecord = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse turn {}", path.display()))?;
@@ -351,7 +351,7 @@ impl RuntimeThreadStore {
 
     pub fn load_item(&self, item_id: &str) -> Result<TurnItemRecord> {
         let path = self.item_path(item_id)?;
-        let raw = fs::read_to_string(&path)
+        let raw = read_store_file(&path)
             .with_context(|| format!("Failed to read item {}", path.display()))?;
         let record: TurnItemRecord = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse item {}", path.display()))?;
@@ -375,7 +375,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let thread: ThreadRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -403,7 +403,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -433,7 +433,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -474,7 +474,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -512,6 +512,7 @@ impl RuntimeThreadStore {
             validated_record_id(item_id, "item id")?;
         }
         let path = self.events_path(thread_id)?;
+        reject_symlinked_store_file(&path)?;
 
         let mut state = self.state.lock().await;
         let seq = state.next_seq;
@@ -550,6 +551,7 @@ impl RuntimeThreadStore {
         since_seq: Option<u64>,
     ) -> Result<Vec<RuntimeEventRecord>> {
         let path = self.events_path(thread_id)?;
+        reject_symlinked_store_file(&path)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -3839,11 +3841,30 @@ fn duration_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
     }
 }
 
+fn reject_symlinked_store_file(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "Runtime store file must not be a symlink: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn read_store_file(path: &Path) -> Result<String> {
+    reject_symlinked_store_file(path)?;
+    fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
+}
+
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory {}", parent.display()))?;
     }
+    reject_symlinked_store_file(path)?;
     let payload = serde_json::to_string_pretty(value)?;
     crate::utils::write_atomic(path, payload.as_bytes())
         .with_context(|| format!("Failed to write {}", path.display()))
