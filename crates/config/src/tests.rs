@@ -598,8 +598,19 @@ struct EnvGuard {
     kimi_model_name: Option<OsString>,
     zai_api_key: Option<OsString>,
     z_ai_api_key: Option<OsString>,
+    zhipu_api_key: Option<OsString>,
+    glm_api_key: Option<OsString>,
     zai_base_url: Option<OsString>,
+    z_ai_base_url: Option<OsString>,
+    zhipu_base_url: Option<OsString>,
+    zhipuai_base_url: Option<OsString>,
+    bigmodel_base_url: Option<OsString>,
     zai_model: Option<OsString>,
+    z_ai_model: Option<OsString>,
+    zhipu_model: Option<OsString>,
+    zhipuai_model: Option<OsString>,
+    bigmodel_model: Option<OsString>,
+    glm_model: Option<OsString>,
     stepfun_api_key: Option<OsString>,
     step_api_key: Option<OsString>,
     stepfun_base_url: Option<OsString>,
@@ -694,8 +705,19 @@ impl EnvGuard {
             kimi_model_name: env::var_os("KIMI_MODEL_NAME"),
             zai_api_key: env::var_os("ZAI_API_KEY"),
             z_ai_api_key: env::var_os("Z_AI_API_KEY"),
+            zhipu_api_key: env::var_os("ZHIPU_API_KEY"),
+            glm_api_key: env::var_os("GLM_API_KEY"),
             zai_base_url: env::var_os("ZAI_BASE_URL"),
+            z_ai_base_url: env::var_os("Z_AI_BASE_URL"),
+            zhipu_base_url: env::var_os("ZHIPU_BASE_URL"),
+            zhipuai_base_url: env::var_os("ZHIPUAI_BASE_URL"),
+            bigmodel_base_url: env::var_os("BIGMODEL_BASE_URL"),
             zai_model: env::var_os("ZAI_MODEL"),
+            z_ai_model: env::var_os("Z_AI_MODEL"),
+            zhipu_model: env::var_os("ZHIPU_MODEL"),
+            zhipuai_model: env::var_os("ZHIPUAI_MODEL"),
+            bigmodel_model: env::var_os("BIGMODEL_MODEL"),
+            glm_model: env::var_os("GLM_MODEL"),
             stepfun_api_key: env::var_os("STEPFUN_API_KEY"),
             step_api_key: env::var_os("STEP_API_KEY"),
             stepfun_base_url: env::var_os("STEPFUN_BASE_URL"),
@@ -785,8 +807,19 @@ impl EnvGuard {
             env::remove_var("KIMI_MODEL_NAME");
             env::remove_var("ZAI_API_KEY");
             env::remove_var("Z_AI_API_KEY");
+            env::remove_var("ZHIPU_API_KEY");
+            env::remove_var("GLM_API_KEY");
             env::remove_var("ZAI_BASE_URL");
+            env::remove_var("Z_AI_BASE_URL");
+            env::remove_var("ZHIPU_BASE_URL");
+            env::remove_var("ZHIPUAI_BASE_URL");
+            env::remove_var("BIGMODEL_BASE_URL");
             env::remove_var("ZAI_MODEL");
+            env::remove_var("Z_AI_MODEL");
+            env::remove_var("ZHIPU_MODEL");
+            env::remove_var("ZHIPUAI_MODEL");
+            env::remove_var("BIGMODEL_MODEL");
+            env::remove_var("GLM_MODEL");
             env::remove_var("STEPFUN_API_KEY");
             env::remove_var("STEP_API_KEY");
             env::remove_var("STEPFUN_BASE_URL");
@@ -908,8 +941,19 @@ impl Drop for EnvGuard {
             Self::restore_var("KIMI_MODEL_NAME", self.kimi_model_name.take());
             Self::restore_var("ZAI_API_KEY", self.zai_api_key.take());
             Self::restore_var("Z_AI_API_KEY", self.z_ai_api_key.take());
+            Self::restore_var("ZHIPU_API_KEY", self.zhipu_api_key.take());
+            Self::restore_var("GLM_API_KEY", self.glm_api_key.take());
             Self::restore_var("ZAI_BASE_URL", self.zai_base_url.take());
+            Self::restore_var("Z_AI_BASE_URL", self.z_ai_base_url.take());
+            Self::restore_var("ZHIPU_BASE_URL", self.zhipu_base_url.take());
+            Self::restore_var("ZHIPUAI_BASE_URL", self.zhipuai_base_url.take());
+            Self::restore_var("BIGMODEL_BASE_URL", self.bigmodel_base_url.take());
             Self::restore_var("ZAI_MODEL", self.zai_model.take());
+            Self::restore_var("Z_AI_MODEL", self.z_ai_model.take());
+            Self::restore_var("ZHIPU_MODEL", self.zhipu_model.take());
+            Self::restore_var("ZHIPUAI_MODEL", self.zhipuai_model.take());
+            Self::restore_var("BIGMODEL_MODEL", self.bigmodel_model.take());
+            Self::restore_var("GLM_MODEL", self.glm_model.take());
             Self::restore_var("STEPFUN_API_KEY", self.stepfun_api_key.take());
             Self::restore_var("STEP_API_KEY", self.step_api_key.take());
             Self::restore_var("STEPFUN_BASE_URL", self.stepfun_base_url.take());
@@ -2941,7 +2985,13 @@ fn provider_metadata_defaults_match_runtime_helpers() {
             default_base_url_for_provider(kind)
         );
         assert!(!provider.display_name().trim().is_empty());
-        assert!(!provider.env_vars().is_empty());
+        // The dynamic custom provider (#1519) intentionally declares no
+        // built-in auth env var: the key env var name is supplied per entry via
+        // `[providers.<name>] api_key_env = "..."`. Every built-in provider
+        // still must declare at least one.
+        if kind != ProviderKind::Custom {
+            assert!(!provider.env_vars().is_empty());
+        }
         // OpenAI Codex (ChatGPT) speaks the Responses API and Anthropic
         // speaks the native Messages API; every other built-in provider
         // is OpenAI-compatible Chat Completions.
@@ -3127,6 +3177,42 @@ fn zai_aliases_resolve_to_canonical_models() {
     assert_eq!(
         normalize_model_for_provider(ProviderKind::Zai, "custom-glm-preview"),
         "custom-glm-preview"
+    );
+}
+
+#[test]
+fn zhipu_aliases_fold_into_zai_provider() {
+    // Zhipu AI and Z.ai are the same vendor; `zhipu`/`zhipuai`/`bigmodel`
+    // resolve to the single Zai provider rather than a separate one.
+    assert_eq!(ProviderKind::parse("zhipu"), Some(ProviderKind::Zai));
+    assert_eq!(ProviderKind::parse("zhipuai"), Some(ProviderKind::Zai));
+    assert_eq!(ProviderKind::parse("bigmodel"), Some(ProviderKind::Zai));
+    assert_eq!(ProviderKind::parse("big-model"), Some(ProviderKind::Zai));
+
+    // A `[providers.zhipu]` table (BigModel China endpoint) merges into the Zai
+    // provider config through the serde alias.
+    let parsed: ConfigToml = toml::from_str(
+        r#"
+        [providers.zhipu]
+        api_key = "$ZHIPU_API_KEY"
+        base_url = "https://open.bigmodel.cn/api/paas/v4/"
+        model = "glm-5-2"
+        "#,
+    )
+    .expect("zhipu provider table parses");
+
+    let provider = parsed.providers.for_provider(ProviderKind::Zai);
+    assert_eq!(provider.api_key.as_deref(), Some("$ZHIPU_API_KEY"));
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.bigmodel.cn/api/paas/v4/")
+    );
+    assert_eq!(provider.model.as_deref(), Some("glm-5-2"));
+
+    // GLM aliases canonicalize under the Zai umbrella.
+    assert_eq!(
+        normalize_model_for_provider(ProviderKind::Zai, "glm-5-2"),
+        DEFAULT_ZAI_MODEL
     );
 }
 
@@ -4155,7 +4241,7 @@ fn openrouter_provider_normalizes_recent_large_model_aliases() {
         ("kimi", OPENROUTER_KIMI_K2_7_CODE_MODEL),
         ("kimi-k2.6", OPENROUTER_KIMI_K2_6_MODEL),
         ("minimax-m3", OPENROUTER_MINIMAX_M3_MODEL),
-        ("minimax-2.7", OPENROUTER_MINIMAX_2_7_MODEL),
+        ("minimax-2.7", OPENROUTER_MINIMAX_M2_7_MODEL),
         ("gemma-4-31b-it", OPENROUTER_GEMMA_4_31B_MODEL),
         ("glm-5.1", OPENROUTER_GLM_5_1_MODEL),
         ("glm-5.2", OPENROUTER_GLM_5_2_MODEL),
@@ -4650,6 +4736,7 @@ fn fleet_profile_explicit_config_parses_role_loadout_permissions() {
 [fleet.profiles.verifier]
 slot = "verifier"
 loadout = "review"
+model = "deepseek-v4-pro"
 
 [fleet.profiles.verifier.role]
 name = "verifier"
@@ -4687,11 +4774,20 @@ concurrency = 3
         Some("Check the patch and report evidence.")
     );
     assert_eq!(profile.loadout, FleetLoadout::Review);
+    assert_eq!(profile.model.as_deref(), Some("deepseek-v4-pro"));
     assert!(!profile.permissions.allow_shell);
     assert!(!profile.permissions.trust);
     assert!(profile.permissions.approval_required);
     assert_eq!(profile.delegation.max_spawn_depth, Some(0));
     assert_eq!(profile.delegation.max_concurrency, Some(3));
+}
+
+#[test]
+fn fleet_loadout_accepts_default_model_classes() {
+    assert_eq!(FleetLoadout::from_name("strong"), FleetLoadout::Strong);
+    assert_eq!(FleetLoadout::from_name("balanced"), FleetLoadout::Balanced);
+    assert_eq!(FleetLoadout::from_name("fast"), FleetLoadout::Fast);
+    assert_eq!(FleetLoadout::Strong.as_str(), "strong");
 }
 
 #[test]

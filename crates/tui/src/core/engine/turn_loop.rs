@@ -110,6 +110,7 @@ impl Engine {
         tools: Option<Vec<Tool>>,
         mode: AppMode,
         force_update_plan_first: bool,
+        dynamic_active_tools: Vec<&'static str>,
     ) -> (TurnOutcomeStatus, Option<String>) {
         // Signal to the terminal / taskbar that a turn is in progress
         // (OSC 9 ; 4 indeterminate progress + title spinner).
@@ -139,6 +140,11 @@ impl Engine {
             }
         }
         let mut active_tool_names = initial_active_tools(&tool_catalog);
+        active_tool_names.extend(
+            dynamic_active_tools
+                .into_iter()
+                .map(std::string::ToString::to_string),
+        );
         let mut goal_continuations_this_turn = 0u32;
 
         // Outer stream-retry counter: when the chunked-transfer connection
@@ -276,9 +282,12 @@ impl Engine {
                 }
             }
 
-            if let Some(input_budget) =
-                context_input_budget_for_provider(self.api_provider, &self.session.model)
-            {
+            if let Some(input_budget) = context_input_budget_for_route(
+                self.api_provider,
+                &self.session.model,
+                self.active_route_limits,
+                0,
+            ) {
                 let estimated_input = self.estimated_input_tokens();
                 if estimated_input > input_budget {
                     if context_recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
@@ -335,6 +344,7 @@ impl Engine {
             let effective_reasoning_effort = resolve_auto_effort(
                 self.session.reasoning_effort.as_deref(),
                 &self.session.messages,
+                self.api_provider,
             );
 
             // Check prefix-cache stability before building the request.
@@ -438,7 +448,10 @@ impl Engine {
             let request = MessageRequest {
                 model: self.session.model.clone(),
                 messages: self.messages_with_turn_metadata(),
-                max_tokens: effective_max_output_tokens(&self.session.model),
+                max_tokens: effective_max_output_tokens_for_route(
+                    &self.session.model,
+                    self.active_route_limits,
+                ),
                 system: self.session.system_prompt.clone(),
                 tools: active_tools.clone(),
                 tool_choice: if active_tools.is_some() {
@@ -1591,9 +1604,18 @@ impl Engine {
                     if let Some(decision) = ask_rule_decision {
                         match decision {
                             ToolAskRuleDecision::Prompt(reason) => {
-                                approval_required = true;
-                                approval_description = reason;
-                                approval_force_prompt = true;
+                                // YOLO mode (auto_approve) is the explicit
+                                // "no approvals" contract: a typed ask-rule
+                                // must not pop a modal in YOLO. The
+                                // auto_review safety floor below still
+                                // independently holds publish/destructive
+                                // actions, and a typed deny rule still
+                                // blocks hard.
+                                if !self.session.auto_approve {
+                                    approval_required = true;
+                                    approval_description = reason;
+                                    approval_force_prompt = true;
+                                }
                             }
                             ToolAskRuleDecision::Block(reason) => {
                                 approval_required = false;
@@ -2797,7 +2819,11 @@ fn should_emit_thinking_only_status(
 /// When the configured effort is `"auto"`, inspects the last user message
 /// and calls [`crate::auto_reasoning::select`] to pick the actual tier.
 /// Non-`"auto"` values pass through unchanged.
-fn resolve_auto_effort(reasoning_effort: Option<&str>, messages: &[Message]) -> Option<String> {
+fn resolve_auto_effort(
+    reasoning_effort: Option<&str>,
+    messages: &[Message],
+    provider: crate::config::ApiProvider,
+) -> Option<String> {
     match reasoning_effort {
         Some("auto") => {
             // Find the last user message in the conversation.
@@ -2829,7 +2855,10 @@ fn resolve_auto_effort(reasoning_effort: Option<&str>, messages: &[Message]) -> 
             // their own turn pass and can pass is_subagent=true when they
             // call this function directly.
             let tier = crate::auto_reasoning::select(false, &last_msg);
-            let resolved = tier.as_setting().to_string();
+            let resolved =
+                crate::model_routing::normalize_auto_route_effort_for_provider(provider, tier)
+                    .as_setting()
+                    .to_string();
             tracing::debug!(
                 reasoning_effort = %resolved,
                 is_subagent = false,
@@ -3065,7 +3094,11 @@ mod tests {
         }];
 
         assert_eq!(
-            resolve_auto_effort(Some("auto"), &messages),
+            resolve_auto_effort(
+                Some("auto"),
+                &messages,
+                crate::config::ApiProvider::Deepseek
+            ),
             Some("high".to_string()),
             "auto thinking should classify the user request, not stored metadata"
         );

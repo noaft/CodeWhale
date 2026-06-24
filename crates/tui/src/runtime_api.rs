@@ -1,6 +1,6 @@
 //! Runtime HTTP/SSE API for local CodeWhale automation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, UdpSocket};
@@ -38,7 +38,9 @@ use crate::automation_manager::{
 };
 use crate::config::{Config, DEFAULT_TEXT_MODEL};
 use crate::fleet::ledger::{FleetLedgerState, FleetTaskLedgerStatus};
-use crate::fleet::manager::{FleetManager, FleetStatusSnapshot, FleetWorkerInspection};
+use crate::fleet::manager::{
+    FleetManager, FleetStatusSnapshot, FleetWorkerInspection, FleetWorkerRuntimeProjection,
+};
 use crate::mcp::McpPool;
 use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
@@ -55,7 +57,10 @@ use crate::skill_state::SkillStateStore;
 use crate::task_manager::{
     NewTaskRequest, SharedTaskManager, TaskManager, TaskManagerConfig, TaskRecord, TaskSummary,
 };
-use crate::tools::subagent::{AgentWorkerRecord, load_persisted_agent_worker_records};
+use crate::tools::subagent::{
+    AgentWorkerRecord, SharedSubAgentManager, load_persisted_agent_worker_records,
+    new_shared_subagent_manager_with_timeout,
+};
 use codewhale_protocol::fleet::{
     FleetArtifactKind, FleetRun, FleetRunId, FleetWorkerEventPayload, FleetWorkerStatus,
 };
@@ -70,12 +75,18 @@ pub struct RuntimeApiState {
     sessions_dir: PathBuf,
     mcp_config_path: PathBuf,
     automations: SharedAutomationManager,
+    sub_agent_manager: SharedSubAgentManager,
     runtime_token: Option<String>,
     skill_state: Arc<Mutex<SkillStateStore>>,
     auth_required: bool,
     bind_host: String,
     bind_port: u16,
     mobile_enabled: bool,
+    /// Shared McpPool reused across HTTP API calls so each call does not
+    /// spawn a duplicate set of MCP server processes. The engine maintains
+    /// its own separate pool; this one is for read-only tool discovery via
+    /// the API.
+    mcp_pool: Arc<Mutex<Option<McpPool>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -410,8 +421,20 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         event_replay: true,
         external_tools: true,
         environments: false,
-        worker_runtime: false,
+        worker_runtime: true,
     }
+}
+
+fn runtime_api_sub_agent_manager(workspace: &FsPath, workers: usize) -> SharedSubAgentManager {
+    let max_agents = workers.max(1);
+    new_shared_subagent_manager_with_timeout(
+        workspace.to_path_buf(),
+        max_agents,
+        max_agents,
+        Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS),
+        max_agents,
+        None,
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -523,6 +546,7 @@ pub async fn run_http_server(
         );
         SkillStateStore::default()
     });
+    let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, options.workers);
     let state = RuntimeApiState {
         config: config.clone(),
         workspace,
@@ -532,12 +556,14 @@ pub async fn run_http_server(
         sessions_dir,
         mcp_config_path: config.mcp_config_path(),
         automations,
+        sub_agent_manager,
         runtime_token: runtime_token.clone(),
         skill_state: Arc::new(Mutex::new(skill_state)),
         auth_required: auth_enabled,
         bind_host: options.host.clone(),
         bind_port: options.port,
         mobile_enabled: options.mobile,
+        mcp_pool: Arc::new(Mutex::new(None)),
     };
     let app = build_router(state);
 
@@ -1781,7 +1807,18 @@ async fn stop_fleet_run(
 }
 
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
+    let exec_config = state
+        .config
+        .fleet
+        .as_ref()
+        .map(|fleet| fleet.exec.clone())
+        .unwrap_or_default();
     FleetManager::open(&state.workspace)
+        .map(|manager| {
+            manager
+                .with_exec_config(exec_config)
+                .with_sub_agent_manager(state.sub_agent_manager.clone())
+        })
         .map_err(|err| ApiError::internal(format!("Failed to open fleet manager: {err}")))
 }
 
@@ -1875,6 +1912,18 @@ fn fleet_worker_json(inspection: &FleetWorkerInspection) -> Value {
         "artifacts": inspection.artifacts.iter().map(fleet_artifact_json).collect::<Vec<_>>(),
         "last_error": inspection.last_error.clone(),
         "alert_state": inspection.alert_state.clone(),
+        "runtime_state": inspection.runtime_state.as_ref().map(fleet_worker_runtime_json),
+    })
+}
+
+fn fleet_worker_runtime_json(runtime: &FleetWorkerRuntimeProjection) -> Value {
+    json!({
+        "agent_status": runtime.agent_status.clone(),
+        "steps_taken": runtime.steps_taken,
+        "latest_message": runtime.latest_message.clone(),
+        "error": runtime.error.clone(),
+        "result_summary": runtime.result_summary.clone(),
+        "has_session": runtime.has_session,
     })
 }
 
@@ -2127,13 +2176,6 @@ async fn list_mcp_servers(
 ) -> Result<Json<McpServersResponse>, ApiError> {
     let config = crate::mcp::load_config_with_workspace(&state.mcp_config_path, &state.workspace)
         .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-    let mut pool = McpPool::new(config.clone());
-    let _errors = pool.connect_all().await;
-    let connected: HashSet<String> = pool
-        .connected_servers()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
 
     let mut servers = Vec::new();
     for (name, server_cfg) in config.servers {
@@ -2143,7 +2185,7 @@ async fn list_mcp_servers(
             required: server_cfg.required,
             command: server_cfg.command.clone(),
             url: server_cfg.url.clone(),
-            connected: connected.contains(&name),
+            connected: false,
             enabled_tools: server_cfg.enabled_tools.clone(),
             disabled_tools: server_cfg.disabled_tools.clone(),
         });
@@ -2157,9 +2199,14 @@ async fn list_mcp_tools(
     State(state): State<RuntimeApiState>,
     Query(query): Query<McpToolsQuery>,
 ) -> Result<Json<McpToolsResponse>, ApiError> {
-    let mut pool =
-        McpPool::from_config_path_with_workspace(&state.mcp_config_path, &state.workspace)
-            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+    let mut pool_guard = state.mcp_pool.lock().await;
+    if pool_guard.is_none() {
+        let new_pool =
+            McpPool::from_config_path_with_workspace(&state.mcp_config_path, &state.workspace)
+                .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+        pool_guard.replace(new_pool);
+    }
+    let pool = pool_guard.as_mut().unwrap();
     let _errors = pool.connect_all().await;
 
     let mut tools = Vec::new();

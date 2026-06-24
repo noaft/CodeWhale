@@ -40,6 +40,7 @@ use crate::models::{
 };
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
+use crate::route_runtime::resolve_runtime_route;
 use crate::seam_manager::{SeamConfig, SeamManager};
 use crate::tools::goal::{GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state};
 use crate::tools::plan::{PlanSnapshot, SharedPlanState, new_shared_plan_state};
@@ -240,6 +241,9 @@ fn append_plan_list(out: &mut String, label: &str, values: &[String]) {
 pub struct EngineConfig {
     /// Model identifier to use for responses.
     pub model: String,
+    /// Route/offering limits for the active provider+model, when the runtime
+    /// route resolver had concrete catalog facts.
+    pub active_route_limits: Option<codewhale_config::route::RouteLimits>,
     /// Workspace root for tool execution and file operations.
     pub workspace: PathBuf,
     /// Allow shell tool execution when true.
@@ -400,6 +404,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             model: DEFAULT_TEXT_MODEL.to_string(),
+            active_route_limits: None,
             workspace: PathBuf::from("."),
             allow_shell: true,
             trust_mode: false,
@@ -545,6 +550,7 @@ pub struct Engine {
     shell_manager: SharedShellManager,
     mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
     api_provider: ApiProvider,
+    active_route_limits: Option<codewhale_config::route::RouteLimits>,
     rx_op: mpsc::Receiver<Op>,
     /// Clone of the op-channel sender, so the engine can self-dispatch ops
     /// (e.g. a goal-continuation `SendMessage` after a turn completes).
@@ -738,16 +744,6 @@ impl Engine {
         format!("{message}\n\n{hint}")
     }
 
-    fn config_for_runtime_route(&self, provider: ApiProvider, model: &str) -> Config {
-        let mut config = self.api_config.clone();
-        config.provider = Some(provider.as_str().to_string());
-        config.provider_config_for_mut(provider).model = Some(model.to_string());
-        if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-            config.default_text_model = Some(model.to_string());
-        }
-        config
-    }
-
     fn activate_runtime_route(&mut self, provider: ApiProvider, model: &str) -> Result<(), String> {
         if self.api_provider == provider
             && self
@@ -758,8 +754,16 @@ impl Engine {
             return Ok(());
         }
 
-        let route_config = self.config_for_runtime_route(provider, model);
-        match DeepSeekClient::new(&route_config) {
+        let route =
+            resolve_runtime_route(&self.api_config, provider, Some(model)).map_err(|reason| {
+                format!(
+                    "Failed to resolve provider route {} / {}: {reason}",
+                    provider.as_str(),
+                    model
+                )
+            })?;
+        let route_config = route.config;
+        match DeepSeekClient::from_candidate(&route_config, &route.candidate) {
             Ok(client) => {
                 self.api_provider = provider;
                 self.api_config = route_config;
@@ -844,8 +848,11 @@ impl Engine {
                     translation_enabled: config.translation_enabled,
                     model_id: &config.model,
                     context_window_override: Some(
-                        crate::config::provider_capability(api_provider, &config.model)
-                            .context_window,
+                        crate::route_budget::route_context_window_tokens(
+                            api_provider,
+                            &config.model,
+                            config.active_route_limits,
+                        ),
                     ),
                     show_thinking: config.show_thinking,
                     verbosity: config.verbosity.as_deref(),
@@ -942,6 +949,7 @@ impl Engine {
             })
             .map(std::sync::Arc::from);
 
+        let active_route_limits = config.active_route_limits;
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -953,6 +961,7 @@ impl Engine {
             shell_manager,
             mcp_pool: None,
             api_provider,
+            active_route_limits,
             rx_op,
             tx_op: tx_op.clone(),
             rx_approval,
@@ -1078,9 +1087,14 @@ impl Engine {
                 self.session.approval_mode,
             );
             if let Some(ToolAskRuleDecision::Prompt(reason)) = ask_rule_decision.as_ref() {
-                approval_required = true;
-                approval_description = reason.clone();
-                approval_force_prompt = true;
+                // YOLO mode (auto_approve) is the explicit "no approvals"
+                // contract: a typed ask-rule must not pop a modal in YOLO.
+                // A typed deny rule still blocks hard below.
+                if !self.session.auto_approve {
+                    approval_required = true;
+                    approval_description = reason.clone();
+                    approval_force_prompt = true;
+                }
             }
             if let Some(ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
                 Err(ToolError::permission_denied(reason))
@@ -1468,10 +1482,15 @@ impl Engine {
                             )))
                             .await;
                     }
-                    Op::SetModel { model, mode: _ } => {
+                    Op::SetModel {
+                        model,
+                        mode: _,
+                        route_limits,
+                    } => {
                         self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
                         self.session.model = model;
                         self.config.model.clone_from(&self.session.model);
+                        self.active_route_limits = route_limits;
                         self.refresh_system_prompt();
                         self.emit_session_updated().await;
                         let _ = self
@@ -2390,6 +2409,7 @@ impl Engine {
             tools,
             input_policy.mode,
             force_update_plan_first,
+            input_policy.dynamic_active_tools,
         ))
         .catch_unwind()
         .await;
@@ -2635,7 +2655,7 @@ impl Engine {
             &self.session.messages,
             &self.session.model,
             self.session.reasoning_effort.clone(),
-            effective_max_output_tokens(&self.session.model),
+            effective_max_output_tokens_for_route(&self.session.model, self.active_route_limits),
         )
         .await
         {
@@ -2703,9 +2723,12 @@ impl Engine {
     }
 
     async fn recover_context_overflow(&mut self, client: &DeepSeekClient, reason: &str) -> bool {
-        let Some(target_budget) =
-            context_input_budget_for_provider(self.api_provider, &self.session.model)
-        else {
+        let Some(target_budget) = context_input_budget_for_route(
+            self.api_provider,
+            &self.session.model,
+            self.active_route_limits,
+            0,
+        ) else {
             return false;
         };
 
@@ -3052,10 +3075,11 @@ impl Engine {
                 locale_tag: &self.config.locale_tag,
                 translation_enabled: self.config.translation_enabled,
                 model_id: &self.config.model,
-                context_window_override: Some(
-                    crate::config::provider_capability(self.api_provider, &self.config.model)
-                        .context_window,
-                ),
+                context_window_override: Some(crate::route_budget::route_context_window_tokens(
+                    self.api_provider,
+                    &self.config.model,
+                    self.active_route_limits,
+                )),
                 show_thinking: self.config.show_thinking,
                 verbosity: self.config.verbosity.as_deref(),
                 skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
@@ -3251,6 +3275,7 @@ struct EffectiveInputPolicy {
     trust_mode: bool,
     auto_approve: bool,
     approval_mode: crate::tui::approval::ApprovalMode,
+    dynamic_active_tools: Vec<&'static str>,
     status: Option<String>,
 }
 
@@ -3267,6 +3292,7 @@ fn effective_input_policy(
     let mut trust_mode = trust_mode;
     let mut auto_approve = auto_approve;
     let mut approval_mode = approval_mode;
+    let mut dynamic_active_tools = Vec::new();
     let mut status = None;
 
     if !provenance.can_authorize_work() {
@@ -3289,14 +3315,12 @@ fn effective_input_policy(
             ));
         }
     } else if is_review_only_user_intent(content) {
-        mode = AppMode::Plan;
-        trust_mode = false;
-        auto_approve = false;
-        if matches!(approval_mode, crate::tui::approval::ApprovalMode::Auto) {
-            approval_mode = crate::tui::approval::ApprovalMode::Suggest;
-        }
+        // Advisory only: never silently override an explicitly chosen mode
+        // or strip its tools. Surface the question modal dynamically so the
+        // model can ask focused follow-ups without inflating every tool prompt.
+        dynamic_active_tools.push(REQUEST_USER_INPUT_NAME);
         status = Some(
-            "Review/inspection request detected; using read-only Plan tools for this turn. Add an explicit fix/edit/commit instruction to allow writes.".to_string(),
+            "Review/inspection request detected; keeping the current mode and exposing request_user_input for focused follow-up questions.".to_string(),
         );
     }
 
@@ -3306,6 +3330,7 @@ fn effective_input_policy(
         trust_mode,
         auto_approve,
         approval_mode,
+        dynamic_active_tools,
         status,
     }
 }
@@ -3387,6 +3412,10 @@ pub(super) fn auto_review_run_origin_for_plan(
     }
 }
 
+// The parameter list intentionally mirrors `AutoReviewContext::from_tool_call`,
+// which this thin wrapper builds; the 8 call sites (1 prod + tests) read clearer
+// passing the fields than constructing a context first.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn auto_review_plan_decision(
     policy: &crate::tui::auto_review::AutoReviewPolicy,
     tool_name: &str,
@@ -3634,13 +3663,15 @@ mod approval;
 mod context;
 mod handle;
 pub(crate) use context::compact_tool_result_for_context;
-#[cfg(test)]
-use context::route_context_budget_for_provider;
 use context::{
-    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP, context_input_budget_for_provider,
-    effective_max_output_tokens, extract_compaction_summary_prompt,
+    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP, context_input_budget_for_route,
+    effective_max_output_tokens_for_route, extract_compaction_summary_prompt,
     is_context_length_error_message, summarize_text,
 };
+#[cfg(test)]
+use context::{context_input_budget_for_provider, effective_max_output_tokens};
+#[cfg(test)]
+use context::{route_context_budget_for_provider, route_context_budget_for_route};
 mod dispatch;
 mod lsp_hooks;
 mod streaming;

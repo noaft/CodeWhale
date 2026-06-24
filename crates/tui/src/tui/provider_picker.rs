@@ -17,7 +17,7 @@
 //! Pressing Esc backs out: from key entry returns to the list; from the
 //! list closes the modal without changes.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -27,12 +27,17 @@ use ratatui::{
 };
 
 use crate::config::{ApiProvider, Config, has_api_key_for, kimi_cli_credentials_present};
+use crate::model_profile::{SupportState, resolved_capability_profile};
 use crate::palette;
+use crate::tui::app::ReasoningEffort;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
+use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot};
 use codewhale_config::provider::WireFormat;
 use codewhale_config::route::{
     LogicalModelRef, PricingSku, RequestProtocol, RouteRequest, RouteResolver, bundled_offerings,
 };
+use serde_json::Value;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -60,7 +65,11 @@ pub struct ProviderDashboardRow {
     pub available_model_count: usize,
     pub default_route: ProviderDefaultRoute,
     pub usage_meter: String,
+    pub reasoning: ProviderReasoningSummary,
+    pub capabilities: ProviderCapabilityBadges,
+    pub model_origin: ProviderModelOrigin,
     pub readiness: ProviderReadiness,
+    pub maturity: ProviderMaturity,
     pub messages: Vec<String>,
     pub is_active: bool,
     has_key: bool,
@@ -99,6 +108,162 @@ pub enum ProviderReadiness {
     Invalid,
 }
 
+/// How battle-tested a provider integration is, independent of whether the
+/// user has credentials configured (which `ProviderReadiness` already tracks).
+/// Kept intentionally minimal — the only two honest states today are an
+/// experimental integration and a supported one (#2984).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderMaturity {
+    Experimental,
+    Supported,
+}
+
+impl ProviderMaturity {
+    /// Maturity is seeded from a small table keyed by provider. Only the
+    /// OpenAI Codex bridge is experimental today; everything else is supported.
+    fn for_provider(provider: ApiProvider) -> Self {
+        match provider {
+            ApiProvider::OpenaiCodex => Self::Experimental,
+            _ => Self::Supported,
+        }
+    }
+
+    /// Compact tag for the picker hint. Returns `None` when the integration is
+    /// supported so the common case stays noise-free (#2984).
+    fn tag(self) -> Option<&'static str> {
+        match self {
+            Self::Experimental => Some("experimental"),
+            Self::Supported => None,
+        }
+    }
+}
+
+/// Where the row's current model came from, so the dashboard can distinguish a
+/// provider default from a saved override or a custom pass-through id (#3083).
+/// Live-catalog/static origins are not yet distinguishable here; they arrive
+/// with the #3385 live-fetch layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderModelOrigin {
+    Default,
+    Saved,
+    Custom,
+}
+
+impl ProviderModelOrigin {
+    fn for_provider(provider: ApiProvider, has_saved_model: bool) -> Self {
+        if has_saved_model {
+            Self::Saved
+        } else if provider == ApiProvider::Custom {
+            Self::Custom
+        } else {
+            Self::Default
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Saved => "saved",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Capability + metadata badges projected from the resolved capability profile
+/// (#3083). Tri-state so "unknown" stays distinct from "unsupported"; metadata
+/// is `None` when not resolvable. Reasoning is tracked separately in
+/// [`ProviderReasoningSummary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCapabilityBadges {
+    pub context_window: Option<u32>,
+    pub max_output: Option<u32>,
+    pub tools: SupportState,
+    pub structured: SupportState,
+    pub streaming: SupportState,
+    pub cache: SupportState,
+}
+
+impl ProviderCapabilityBadges {
+    fn for_route(provider: ApiProvider, wire_model: &str) -> Self {
+        let cap = resolved_capability_profile(provider, wire_model);
+        Self {
+            context_window: cap.context_window,
+            max_output: cap.max_output,
+            tools: cap.native_tool_calls,
+            structured: cap.structured_output,
+            streaming: cap.streaming,
+            cache: cap.prompt_caching,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            context_window: None,
+            max_output: None,
+            tools: SupportState::Unknown,
+            structured: SupportState::Unknown,
+            streaming: SupportState::Unknown,
+            cache: SupportState::Unknown,
+        }
+    }
+
+    /// Compact, never-fabricating badge cluster. Metadata and each capability
+    /// render `?` when unknown rather than being silently dropped.
+    fn label(&self) -> String {
+        format!(
+            "ctx:{} out:{} tools:{} json:{} stream:{} cache:{}",
+            humanize_token_count(self.context_window),
+            humanize_token_count(self.max_output),
+            support_glyph(self.tools),
+            support_glyph(self.structured),
+            support_glyph(self.streaming),
+            support_glyph(self.cache),
+        )
+    }
+}
+
+fn support_glyph(state: SupportState) -> &'static str {
+    match state {
+        SupportState::Supported => "y",
+        SupportState::Unsupported => "n",
+        SupportState::Unknown => "?",
+    }
+}
+
+fn humanize_token_count(value: Option<u32>) -> String {
+    match value {
+        None => "?".to_string(),
+        Some(v) if v >= 1_000_000 && v % 1_000_000 == 0 => format!("{}M", v / 1_000_000),
+        Some(v) if v >= 1_000_000 => format!("{:.1}M", f64::from(v) / 1_000_000.0),
+        Some(v) if v >= 1_000 => format!("{}K", v / 1_000),
+        Some(v) => v.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderReasoningSummary {
+    pub support: ProviderReasoningSupport,
+    pub controls: Vec<String>,
+    pub stream_visibility: ProviderReasoningStreamVisibility,
+    pub selected_control: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderReasoningSupport {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderReasoningStreamVisibility {
+    StructuredThinking,
+    InlineTags,
+    SummaryOnly,
+    NotExposed,
+    Unknown,
+}
+
 impl ProviderDashboardRow {
     fn from_config(provider: ApiProvider, active: ApiProvider, config: &Config) -> Self {
         let has_key = has_api_key_for(config, provider);
@@ -113,6 +278,8 @@ impl ProviderDashboardRow {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let has_configured_model = configured_model.is_some();
+        let model_origin = ProviderModelOrigin::for_provider(provider, has_configured_model);
         let auth_status = auth_status_for(provider, has_key, configured);
         let usage_meter = usage_meter_for(provider);
 
@@ -134,7 +301,11 @@ impl ProviderDashboardRow {
                     wire_model: "legacy alias".to_string(),
                 },
                 usage_meter,
+                reasoning: ProviderReasoningSummary::unknown(provider, config),
+                capabilities: ProviderCapabilityBadges::unknown(),
+                model_origin,
                 readiness: ProviderReadiness::Legacy,
+                maturity: ProviderMaturity::for_provider(provider),
                 messages: vec![
                     "legacy DeepSeek China alias; routing maps through DeepSeek compatibility"
                         .to_string(),
@@ -212,6 +383,8 @@ impl ProviderDashboardRow {
         }
 
         let readiness = readiness_for(provider, auth_status, route_ok);
+        let reasoning = ProviderReasoningSummary::for_route(provider, &default_route, config);
+        let capabilities = ProviderCapabilityBadges::for_route(provider, &default_route.wire_model);
 
         Self {
             provider,
@@ -225,7 +398,11 @@ impl ProviderDashboardRow {
             available_model_count,
             default_route,
             usage_meter: resolved_pricing,
+            reasoning,
+            capabilities,
+            model_origin,
             readiness,
+            maturity: ProviderMaturity::for_provider(provider),
             messages,
             is_active: provider == active,
             has_key,
@@ -233,16 +410,36 @@ impl ProviderDashboardRow {
     }
 
     fn compact_hint(&self) -> String {
+        // Self-hosted providers carry a local/private posture; surface it next
+        // to the base URL so the row reads correctly without a key (#3083).
+        let self_hosted = if matches!(
+            self.auth_status,
+            ProviderAuthStatus::Local | ProviderAuthStatus::Optional
+        ) {
+            " (self-hosted)"
+        } else {
+            ""
+        };
         format!(
-            "{} | auth:{} | {} | {} | base:{} | route:{}{} | catalog:{}",
+            "{} | auth:{} | {} | {} | base:{}{} | route:{}{} origin:{} | {} | {} | catalog:{}{}",
             self.readiness.label(),
             self.auth_status.label(),
             self.usage_meter,
             self.supported_protocols.join("+"),
             compact_base_url(&self.base_url),
+            self_hosted,
             self.default_route.logical_model,
             route_wire_suffix(&self.default_route),
-            self.catalog_label()
+            self.model_origin.label(),
+            self.capabilities.label(),
+            self.reasoning.label(),
+            self.catalog_label(),
+            // Only experimental integrations add a tag; supported ones stay
+            // noise-free (#2984).
+            self.maturity
+                .tag()
+                .map(|tag| format!(" | {tag}"))
+                .unwrap_or_default(),
         )
     }
 
@@ -251,6 +448,82 @@ impl ProviderDashboardRow {
             ProviderCatalogStatus::Bundled => format!("{} bundled", self.available_model_count),
             ProviderCatalogStatus::DefaultOnly => "default-only".to_string(),
             ProviderCatalogStatus::Legacy => "legacy".to_string(),
+        }
+    }
+}
+
+impl ProviderReasoningSummary {
+    fn for_route(provider: ApiProvider, route: &ProviderDefaultRoute, config: &Config) -> Self {
+        if provider == ApiProvider::OpenaiCodex {
+            return Self {
+                support: ProviderReasoningSupport::Supported,
+                controls: codex_reasoning_controls(),
+                stream_visibility: ProviderReasoningStreamVisibility::StructuredThinking,
+                selected_control: selected_reasoning_control(provider, config),
+            };
+        }
+
+        if let Some(offering) = reasoning_catalog_offering(provider, route) {
+            let support = match offering.reasoning {
+                Some(true) => ProviderReasoningSupport::Supported,
+                Some(false) => ProviderReasoningSupport::Unsupported,
+                None => ProviderReasoningSupport::Unknown,
+            };
+            let controls = reasoning_controls_from_options(&offering.reasoning_options);
+            return Self {
+                support,
+                controls,
+                stream_visibility: configured_or_default_stream_visibility(
+                    provider, config, support,
+                ),
+                selected_control: selected_reasoning_control(provider, config),
+            };
+        }
+
+        Self::unknown(provider, config)
+    }
+
+    fn unknown(provider: ApiProvider, config: &Config) -> Self {
+        Self {
+            support: ProviderReasoningSupport::Unknown,
+            controls: Vec::new(),
+            stream_visibility: configured_or_default_stream_visibility(
+                provider,
+                config,
+                ProviderReasoningSupport::Unknown,
+            ),
+            selected_control: selected_reasoning_control(provider, config),
+        }
+    }
+
+    fn label(&self) -> String {
+        let support = match self.support {
+            ProviderReasoningSupport::Supported if !self.controls.is_empty() => {
+                format!("reasoning:{}", self.controls.join("/"))
+            }
+            ProviderReasoningSupport::Supported => "reasoning:yes".to_string(),
+            ProviderReasoningSupport::Unsupported => "reasoning:no".to_string(),
+            ProviderReasoningSupport::Unknown => "reasoning:unknown".to_string(),
+        };
+        let mut parts = vec![
+            support,
+            format!("stream:{}", self.stream_visibility.label()),
+        ];
+        if let Some(selected) = &self.selected_control {
+            parts.push(format!("ctrl:{selected}"));
+        }
+        parts.join(" ")
+    }
+}
+
+impl ProviderReasoningStreamVisibility {
+    fn label(self) -> &'static str {
+        match self {
+            Self::StructuredThinking => "structured",
+            Self::InlineTags => "inline-tags",
+            Self::SummaryOnly => "summary-only",
+            Self::NotExposed => "not-exposed",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -278,6 +551,147 @@ impl ProviderReadiness {
             Self::Legacy => "legacy",
             Self::Invalid => "invalid",
         }
+    }
+}
+
+fn reasoning_catalog_offering(
+    provider: ApiProvider,
+    route: &ProviderDefaultRoute,
+) -> Option<&'static CatalogOffering> {
+    let provider_id = provider.kind()?.as_str();
+    bundled_reasoning_catalog()
+        .offerings
+        .iter()
+        .find(|offering| {
+            offering.provider == provider_id
+                && offering
+                    .wire_model_id
+                    .eq_ignore_ascii_case(&route.wire_model)
+        })
+}
+
+fn bundled_reasoning_catalog() -> &'static CatalogSnapshot {
+    static CATALOG: OnceLock<CatalogSnapshot> = OnceLock::new();
+    CATALOG.get_or_init(|| CatalogSnapshot {
+        // Source reasoning descriptors from the single bundled Models.dev
+        // snapshot (the same data #3385's catalog layer uses) rather than a
+        // hand-maintained per-row seed, so provider reasoning rows (GLM-5.2,
+        // etc.) cannot drift from the catalog and every bundled provider with
+        // reasoning facts is covered, not just GLM.
+        offerings: codewhale_config::catalog::bundled_catalog_offerings(),
+    })
+}
+
+fn codex_reasoning_controls() -> Vec<String> {
+    [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Max,
+    ]
+    .iter()
+    .map(|effort| {
+        effort
+            .display_label_for_provider(ApiProvider::OpenaiCodex)
+            .to_string()
+    })
+    .collect()
+}
+
+fn reasoning_controls_from_options(options: &[Value]) -> Vec<String> {
+    let mut controls = Vec::new();
+    for option in options {
+        collect_reasoning_controls(option, &mut controls);
+    }
+    controls
+}
+
+fn collect_reasoning_controls(value: &Value, controls: &mut Vec<String>) {
+    match value {
+        Value::String(text) => push_reasoning_control(controls, text),
+        Value::Array(items) => {
+            for item in items {
+                collect_reasoning_controls(item, controls);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(values) = map.get("values") {
+                collect_reasoning_controls(values, controls);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_reasoning_control(controls: &mut Vec<String>, value: &str) {
+    let normalized = value.trim();
+    if normalized.is_empty() || controls.iter().any(|item| item == normalized) {
+        return;
+    }
+    controls.push(normalized.to_string());
+}
+
+fn selected_reasoning_control(provider: ApiProvider, config: &Config) -> Option<String> {
+    let effort = ReasoningEffort::from_setting_for_provider(config.reasoning_effort()?, provider);
+    Some(effort.display_label_for_provider(provider).to_string())
+}
+
+fn configured_or_default_stream_visibility(
+    provider: ApiProvider,
+    config: &Config,
+    support: ProviderReasoningSupport,
+) -> ProviderReasoningStreamVisibility {
+    if let Some(configured) = config
+        .provider_config_for(provider)
+        .and_then(|entry| entry.reasoning_stream_style.as_deref())
+        && let Some(visibility) = parse_reasoning_stream_visibility(configured)
+    {
+        return visibility;
+    }
+
+    match support {
+        ProviderReasoningSupport::Unsupported => ProviderReasoningStreamVisibility::NotExposed,
+        ProviderReasoningSupport::Unknown => ProviderReasoningStreamVisibility::Unknown,
+        ProviderReasoningSupport::Supported => default_reasoning_stream_visibility(provider),
+    }
+}
+
+fn parse_reasoning_stream_visibility(value: &str) -> Option<ProviderReasoningStreamVisibility> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "separate_field" | "separate" | "field" | "structured" | "structured_thinking" => {
+            Some(ProviderReasoningStreamVisibility::StructuredThinking)
+        }
+        "inline_tags" | "inline" | "think_tags" | "thinking_tags" => {
+            Some(ProviderReasoningStreamVisibility::InlineTags)
+        }
+        "summary" | "summary_only" => Some(ProviderReasoningStreamVisibility::SummaryOnly),
+        "none" | "text" | "disabled" | "off" | "not_exposed" => {
+            Some(ProviderReasoningStreamVisibility::NotExposed)
+        }
+        _ => None,
+    }
+}
+
+fn default_reasoning_stream_visibility(provider: ApiProvider) -> ProviderReasoningStreamVisibility {
+    match provider {
+        ApiProvider::OpenaiCodex
+        | ApiProvider::Deepseek
+        | ApiProvider::DeepseekCN
+        | ApiProvider::NvidiaNim
+        | ApiProvider::Openrouter
+        | ApiProvider::XiaomiMimo
+        | ApiProvider::Novita
+        | ApiProvider::Fireworks
+        | ApiProvider::Siliconflow
+        | ApiProvider::SiliconflowCn
+        | ApiProvider::Volcengine
+        | ApiProvider::Arcee
+        | ApiProvider::Minimax
+        | ApiProvider::Sglang
+        | ApiProvider::Vllm
+        | ApiProvider::Zai
+        | ApiProvider::Moonshot => ProviderReasoningStreamVisibility::StructuredThinking,
+        _ => ProviderReasoningStreamVisibility::Unknown,
     }
 }
 
@@ -415,13 +829,16 @@ fn route_wire_suffix(route: &ProviderDefaultRoute) -> String {
     }
 }
 
+/// Strip the scheme and trailing slash, then cap the length so one long base
+/// URL can't dominate (and overflow) the provider hint row. Capped values get
+/// an ellipsis; short URLs pass through unchanged.
 fn compact_base_url(base_url: &str) -> String {
-    base_url
+    let stripped = base_url
         .trim()
         .trim_start_matches("https://")
         .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string()
+        .trim_end_matches('/');
+    crate::tui::ui_text::truncate_line_to_width(stripped, 24)
 }
 
 impl ProviderPickerView {
@@ -465,6 +882,28 @@ impl ProviderPickerView {
             self.selected_idx = 0;
         } else {
             self.selected_idx += 1;
+        }
+    }
+
+    /// Type-ahead: move the selection to the next provider whose display name
+    /// starts with the given character (case-insensitive), wrapping so repeated
+    /// presses cycle through matches — e.g. pressing `z` jumps to "Z.ai".
+    fn jump_to_letter(&mut self, c: char) {
+        let count = self.rows.len();
+        if count == 0 {
+            return;
+        }
+        let target = c.to_ascii_lowercase();
+        for offset in 1..=count {
+            let idx = (self.selected_idx + offset) % count;
+            if self.rows[idx]
+                .display_name
+                .to_ascii_lowercase()
+                .starts_with(target)
+            {
+                self.selected_idx = idx;
+                return;
+            }
         }
     }
 
@@ -523,10 +962,14 @@ impl ProviderPickerView {
             .title_bottom(Line::from(vec![
                 Span::styled(" ↑↓ ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw("move "),
+                Span::styled(" a-z ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("jump "),
                 Span::styled(" Enter ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw(format!("{enter_action} ")),
                 Span::styled(" R ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw("edit key "),
+                Span::styled(" M ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::raw("models "),
                 Span::styled(" Esc ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw("cancel "),
             ]))
@@ -727,6 +1170,19 @@ impl ModalView for ProviderPickerView {
                     self.enter_key_entry();
                     ViewAction::None
                 }
+                // Jump to the `/model` picker pre-filtered to this provider
+                // (#3083). Handled before the type-ahead arm so `m`/`M` opens
+                // models instead of seeking a provider whose name starts with m.
+                KeyCode::Char(c) if key.modifiers.is_empty() && c.eq_ignore_ascii_case(&'m') => {
+                    let provider = self.selected_provider();
+                    ViewAction::EmitAndClose(ViewEvent::ProviderPickerOpenModels { provider })
+                }
+                // Type-ahead: any other letter jumps to the next provider whose
+                // name starts with it (e.g. `z` -> "Z.ai").
+                KeyCode::Char(c) if key.modifiers.is_empty() && c.is_ascii_alphabetic() => {
+                    self.jump_to_letter(c);
+                    ViewAction::None
+                }
                 _ => ViewAction::None,
             },
             Stage::KeyEntry => match key.code {
@@ -768,6 +1224,17 @@ impl ModalView for ProviderPickerView {
                 _ => ViewAction::None,
             },
         }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        if self.stage == Stage::List {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.move_up(),
+                MouseEventKind::ScrollDown => self.move_down(),
+                _ => {}
+            }
+        }
+        ViewAction::None
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -861,6 +1328,52 @@ mod tests {
     }
 
     #[test]
+    fn type_ahead_jumps_to_provider_by_first_letter() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        // `z` is unique to Z.ai among provider display names.
+        picker.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(picker.selected_provider(), ApiProvider::Zai);
+    }
+
+    #[test]
+    fn compact_base_url_strips_scheme_and_caps_length() {
+        // Short URLs pass through unchanged (scheme + trailing slash stripped).
+        assert_eq!(
+            compact_base_url("https://api.deepseek.com/"),
+            "api.deepseek.com"
+        );
+        assert_eq!(
+            compact_base_url("http://localhost:9000/v1"),
+            "localhost:9000/v1"
+        );
+        // A long URL is capped so it can't dominate the hint row.
+        let long = compact_base_url("https://api-us-west-2.example-region.company.com/v1/openai");
+        assert!(long.ends_with("..."), "expected an ellipsis, got {long:?}");
+        assert!(
+            long.chars().count() <= 24,
+            "capped to 24 cols, got {long:?}"
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_moves_selection_in_list_stage() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let before = picker.selected_idx;
+        picker.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_ne!(
+            picker.selected_idx, before,
+            "scroll down should advance the selection"
+        );
+    }
+
+    #[test]
     fn picker_lists_all_providers() {
         let config = Config::default();
         let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
@@ -908,6 +1421,238 @@ mod tests {
         assert_eq!(row.usage_meter, "cost: local");
         assert!(row.base_url.contains("localhost:11434"));
         assert!(row.is_active);
+    }
+
+    #[test]
+    fn openai_codex_row_is_experimental_and_tagged_in_hint() {
+        let config = Config::default();
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::OpenaiCodex,
+            ApiProvider::Deepseek,
+            &config,
+        );
+
+        // #2984: maturity is a separate axis from auth/readiness.
+        assert_eq!(row.maturity, ProviderMaturity::Experimental);
+        assert!(
+            row.compact_hint().contains("experimental"),
+            "experimental maturity must surface in the hint, got {:?}",
+            row.compact_hint()
+        );
+    }
+
+    #[test]
+    fn mainstream_provider_is_supported_without_experimental_tag() {
+        let config = Config::default();
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+
+        // #2984: supported integrations stay noise-free (no tag).
+        assert_eq!(row.maturity, ProviderMaturity::Supported);
+        assert!(
+            !row.compact_hint().contains("experimental"),
+            "supported providers must omit the experimental tag, got {:?}",
+            row.compact_hint()
+        );
+    }
+
+    #[test]
+    fn provider_dashboard_row_surfaces_glm_reasoning_controls() {
+        let config = Config {
+            reasoning_effort: Some("max".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                zai: crate::config::ProviderConfig {
+                    api_key: Some("zai-key".to_string()),
+                    model: Some("GLM-5.2".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let row = ProviderDashboardRow::from_config(ApiProvider::Zai, ApiProvider::Zai, &config);
+
+        assert_eq!(row.default_route.wire_model, "GLM-5.2");
+        assert_eq!(row.reasoning.support, ProviderReasoningSupport::Supported);
+        assert_eq!(
+            row.reasoning.controls,
+            vec!["high".to_string(), "max".to_string()]
+        );
+        assert_eq!(
+            row.reasoning.stream_visibility,
+            ProviderReasoningStreamVisibility::StructuredThinking
+        );
+        assert_eq!(row.reasoning.selected_control.as_deref(), Some("max"));
+        assert!(row.compact_hint().contains("reasoning:high/max"));
+        assert!(row.compact_hint().contains("stream:structured"));
+    }
+
+    #[test]
+    fn provider_dashboard_row_surfaces_codex_reasoning_scale() {
+        let config = Config {
+            reasoning_effort: Some("max".to_string()),
+            ..Config::default()
+        };
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::OpenaiCodex,
+            ApiProvider::OpenaiCodex,
+            &config,
+        );
+
+        assert_eq!(row.reasoning.support, ProviderReasoningSupport::Supported);
+        assert_eq!(
+            row.reasoning.controls,
+            vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+            ]
+        );
+        assert_eq!(
+            row.reasoning.stream_visibility,
+            ProviderReasoningStreamVisibility::StructuredThinking
+        );
+        assert_eq!(row.reasoning.selected_control.as_deref(), Some("xhigh"));
+        assert!(
+            row.compact_hint()
+                .contains("reasoning:low/medium/high/xhigh")
+        );
+    }
+
+    #[test]
+    fn provider_dashboard_row_surfaces_capability_and_metadata_badges() {
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    api_key: Some("deepseek-key".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+
+        // Metadata badges are projected from the resolved capability profile,
+        // never hardcoded per UI surface.
+        assert!(row.capabilities.context_window.is_some());
+        assert!(row.capabilities.max_output.is_some());
+        let hint = row.compact_hint();
+        assert!(hint.contains("ctx:"), "metadata badge missing: {hint}");
+        assert!(hint.contains("out:"), "metadata badge missing: {hint}");
+        // Capability cluster present (tri-state; unknown renders `?`, never
+        // silently omitted).
+        for badge in ["tools:", "json:", "stream:", "cache:"] {
+            assert!(
+                hint.contains(badge),
+                "capability badge {badge} missing: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_dashboard_row_classifies_model_origin() {
+        // Default: no configured model override.
+        let config = Config::default();
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+        assert_eq!(row.model_origin, ProviderModelOrigin::Default);
+        assert!(row.compact_hint().contains("origin:default"));
+
+        // Saved: a configured model override for the provider.
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    api_key: Some("k".to_string()),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+        assert_eq!(row.model_origin, ProviderModelOrigin::Saved);
+        assert!(row.compact_hint().contains("origin:saved"));
+    }
+
+    #[test]
+    fn model_origin_classifier_covers_default_saved_custom() {
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Deepseek, false),
+            ProviderModelOrigin::Default
+        );
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Deepseek, true),
+            ProviderModelOrigin::Saved
+        );
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Custom, false),
+            ProviderModelOrigin::Custom
+        );
+        // An explicit saved model still wins for a custom provider.
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Custom, true),
+            ProviderModelOrigin::Saved
+        );
+    }
+
+    #[test]
+    fn self_hosted_provider_row_marks_self_hosted_in_hint() {
+        let config = Config::default();
+        let row =
+            ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
+        assert_eq!(row.auth_status, ProviderAuthStatus::Local);
+        assert!(
+            row.compact_hint().contains("(self-hosted)"),
+            "self-hosted hint missing: {}",
+            row.compact_hint()
+        );
+
+        let sglang =
+            ProviderDashboardRow::from_config(ApiProvider::Sglang, ApiProvider::Sglang, &config);
+        assert_eq!(sglang.auth_status, ProviderAuthStatus::Optional);
+        assert!(
+            sglang.compact_hint().contains("(self-hosted)"),
+            "self-hosted hint missing for SGLang: {}",
+            sglang.compact_hint()
+        );
+    }
+
+    #[test]
+    fn self_hosted_reasoning_visibility_covers_vllm() {
+        assert_eq!(
+            default_reasoning_stream_visibility(ApiProvider::Sglang),
+            ProviderReasoningStreamVisibility::StructuredThinking
+        );
+        assert_eq!(
+            default_reasoning_stream_visibility(ApiProvider::Vllm),
+            ProviderReasoningStreamVisibility::StructuredThinking
+        );
+    }
+
+    #[test]
+    fn humanize_token_count_is_compact_and_marks_unknown() {
+        assert_eq!(humanize_token_count(None), "?");
+        assert_eq!(humanize_token_count(Some(1_000_000)), "1M");
+        assert_eq!(humanize_token_count(Some(1_500_000)), "1.5M");
+        assert_eq!(humanize_token_count(Some(131_072)), "131K");
+        assert_eq!(humanize_token_count(Some(512)), "512");
     }
 
     #[test]
@@ -1042,6 +1787,40 @@ mod tests {
                 assert_eq!(provider, ApiProvider::Ollama);
             }
             other => panic!("expected ProviderPickerApplied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pressing_m_opens_models_for_selected_provider() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        move_to_provider(&mut picker, ApiProvider::Openrouter);
+
+        let action = picker.handle_key(key(KeyCode::Char('m')));
+
+        // #3083: `m` jumps to the model picker scoped to the highlighted
+        // provider rather than acting as a type-ahead seek.
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerOpenModels { provider }) => {
+                assert_eq!(provider, ApiProvider::Openrouter);
+            }
+            other => panic!("expected ProviderPickerOpenModels, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pressing_uppercase_m_also_opens_models() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+
+        // Case-insensitive like the `R` edit-key affordance: a bare `M` works.
+        let action = picker.handle_key(key(KeyCode::Char('M')));
+
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerOpenModels { provider }) => {
+                assert_eq!(provider, ApiProvider::Deepseek);
+            }
+            other => panic!("expected ProviderPickerOpenModels, got {other:?}"),
         }
     }
 

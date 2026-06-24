@@ -363,6 +363,7 @@ pub enum MessageId {
     CmdStashDescription,
     CmdStatusDescription,
     CmdStatuslineDescription,
+    CmdFleetDescription,
     CmdSubagentsDescription,
     CmdSwarmDescription,
     CmdSystemDescription,
@@ -430,7 +431,6 @@ pub enum MessageId {
     KbFuzzyFilePicker,
     KbCompactInspector,
     KbLastMessagePager,
-    KbSelectedDetails,
     KbToolDetailsPager,
     KbThinkingPager,
     KbLiveTranscript,
@@ -545,6 +545,18 @@ pub enum MessageId {
     CtxMenuHelpDesc,
     // Agent fanout card.
     FanoutCounts,
+
+    // App mode picker (prompt, names, hints) and composer vim indicator.
+    ModePickerPrompt,
+    AppModeAgent,
+    AppModeYolo,
+    AppModePlan,
+    AppModeAgentHint,
+    AppModePlanHint,
+    AppModeYoloHint,
+    VimModeNormal,
+    VimModeInsert,
+    VimModeVisual,
 
     // Approval dialog — risk badges, category labels, field labels, options.
     ApprovalRiskReview,
@@ -801,6 +813,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdStashDescription,
     MessageId::CmdStatusDescription,
     MessageId::CmdStatuslineDescription,
+    MessageId::CmdFleetDescription,
     MessageId::CmdSubagentsDescription,
     MessageId::CmdSwarmDescription,
     MessageId::CmdSystemDescription,
@@ -873,7 +886,6 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::KbFuzzyFilePicker,
     MessageId::KbCompactInspector,
     MessageId::KbLastMessagePager,
-    MessageId::KbSelectedDetails,
     MessageId::KbToolDetailsPager,
     MessageId::KbThinkingPager,
     MessageId::KbLiveTranscript,
@@ -983,6 +995,16 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CtxMenuHelp,
     MessageId::CtxMenuHelpDesc,
     MessageId::FanoutCounts,
+    MessageId::ModePickerPrompt,
+    MessageId::AppModeAgent,
+    MessageId::AppModeYolo,
+    MessageId::AppModePlan,
+    MessageId::AppModeAgentHint,
+    MessageId::AppModePlanHint,
+    MessageId::AppModeYoloHint,
+    MessageId::VimModeNormal,
+    MessageId::VimModeInsert,
+    MessageId::VimModeVisual,
     MessageId::ApprovalRiskReview,
     MessageId::ApprovalRiskDestructive,
     MessageId::ApprovalCategorySafe,
@@ -1463,7 +1485,8 @@ fn english(id: MessageId) -> &'static str {
         }
         MessageId::CmdStatusDescription => "Show runtime session status",
         MessageId::CmdStatuslineDescription => "Configure which items appear in the footer",
-        MessageId::CmdSubagentsDescription => "List sub-agent status",
+        MessageId::CmdFleetDescription => "Open Fleet setup or worker status",
+        MessageId::CmdSubagentsDescription => "Compatibility shortcut for /fleet status",
         MessageId::CmdSwarmDescription => {
             "Run a multi-agent fanout turn (sequential | mixture | distill | deliberate)"
         }
@@ -1578,9 +1601,6 @@ fn english(id: MessageId) -> &'static str {
         MessageId::KbFuzzyFilePicker => "Open the fuzzy file picker (insert @path on Enter)",
         MessageId::KbCompactInspector => "Open compact session context inspector",
         MessageId::KbLastMessagePager => "Open pager for the last message (when input is empty)",
-        MessageId::KbSelectedDetails => {
-            "Open details for the selected tool or message (when input is empty)"
-        }
         MessageId::KbToolDetailsPager => "Open tool-details pager",
         MessageId::KbThinkingPager => "Open Activity Detail",
         MessageId::KbLiveTranscript => "Open live transcript overlay (sticky-tail auto-scroll)",
@@ -1620,7 +1640,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::LinksTip => {
             "Tip: Use the env var shown for your provider, or save the key with `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Fetching sub-agent status...",
+        MessageId::SubagentsFetching => "Fetching Fleet worker status...",
         MessageId::HelpUnknownCommand => "Unknown command: {topic}",
         MessageId::HomeDashboardTitle => "codewhale Home Dashboard",
         MessageId::HomeModel => "Model:",
@@ -1629,7 +1649,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::HomeHistory => "History:",
         MessageId::HomeTokens => "Tokens:",
         MessageId::HomeQueued => "Queued:",
-        MessageId::HomeSubagents => "Sub-agents:",
+        MessageId::HomeSubagents => "Fleet workers:",
         MessageId::HomeSkill => "Skill:",
         MessageId::HomeQuickActions => "Quick Actions",
         MessageId::HomeQuickLinks => "/links      - Dashboard & API links",
@@ -1637,7 +1657,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::HomeQuickConfig => "/config      - Open interactive configuration editor",
         MessageId::HomeQuickSettings => "/settings    - Show persistent settings",
         MessageId::HomeQuickModel => "/model       - Switch or view model",
-        MessageId::HomeQuickSubagents => "/subagents   - List sub-agent status",
+        MessageId::HomeQuickSubagents => "/fleet status - Fleet worker status",
         MessageId::HomeQuickTaskList => "/task list   - Show background task queue",
         MessageId::HomeQuickHelp => "/help        - Show help",
         MessageId::HomeModeTips => "Mode Tips",
@@ -1731,6 +1751,18 @@ fn english(id: MessageId) -> &'static str {
             "{done} done · {running} running · {failed} failed · {pending} pending"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "Choose how CodeWhale should operate:",
+        MessageId::AppModeAgent => "Agent",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "Plan",
+        MessageId::AppModeAgentHint => "Normal execution with approvals",
+        MessageId::AppModePlanHint => "Plan first before execution",
+        MessageId::AppModeYoloHint => "Auto-approve; shell enabled",
+        MessageId::VimModeNormal => "-- NORMAL --",
+        MessageId::VimModeInsert => "-- INSERT --",
+        MessageId::VimModeVisual => "-- VISUAL --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "REVIEW",
         MessageId::ApprovalRiskDestructive => "DESTRUCTIVE",
@@ -1810,9 +1842,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::CtxInspNoSystemPrompt => "No system prompt set.",
         MessageId::CtxInspNoReferences => "No file, directory, or media references recorded yet.",
         MessageId::CtxInspNoToolActivity => "No tool activity recorded yet.",
-        MessageId::CtxInspAltVHint => {
-            "Open the matching card and press Alt+V (or v) for full details."
-        }
+        MessageId::CtxInspAltVHint => "Open the matching card and press Alt+V for full details.",
         MessageId::CtxInspCells => "cells",
         MessageId::CtxInspApiMessages => "API messages",
         MessageId::CtxInspActive => "active",
@@ -2091,7 +2121,8 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::CmdStatuslineDescription => {
             "Cấu hình các mục hiển thị ở thanh trạng thái dưới cùng"
         }
-        MessageId::CmdSubagentsDescription => "Liệt kê trạng thái của các sub-agent",
+        MessageId::CmdFleetDescription => "Mở thiết lập Fleet hoặc trạng thái worker",
+        MessageId::CmdSubagentsDescription => "Lối tắt tương thích cho /fleet status",
         MessageId::CmdSwarmDescription => {
             "Khởi chạy chế độ đa agent (sequential | mixture | distill | deliberate)"
         }
@@ -2211,9 +2242,6 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::KbLastMessagePager => {
             "Mở trang xem cho tin nhắn cuối cùng (khi khung nhập trống)"
         }
-        MessageId::KbSelectedDetails => {
-            "Mở chi tiết cho công cụ hoặc tin nhắn được chọn (khi khung nhập trống)"
-        }
         MessageId::KbToolDetailsPager => "Mở trang xem chi tiết công cụ",
         MessageId::KbThinkingPager => "Mở Chi Tiết Hoạt Động (Activity Detail)",
         MessageId::KbLiveTranscript => "Mở lớp phủ bản ghi trực tiếp (tự động cuộn theo đuôi)",
@@ -2255,7 +2283,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "Mẹo: Dùng biến môi trường được hiển thị cho nhà cung cấp, hoặc lưu khóa bằng `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Đang lấy trạng thái của các sub-agent...",
+        MessageId::SubagentsFetching => "Đang lấy trạng thái Fleet worker...",
         MessageId::HelpUnknownCommand => "Lệnh không xác định: {topic}",
         MessageId::HomeDashboardTitle => "Bảng Điều Khiển Trang Chủ codewhale",
         MessageId::HomeModel => "Mô hình:",
@@ -2264,7 +2292,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "Lịch sử:",
         MessageId::HomeTokens => "Token:",
         MessageId::HomeQueued => "Trong hàng đợi:",
-        MessageId::HomeSubagents => "Sub-agent:",
+        MessageId::HomeSubagents => "Fleet worker:",
         MessageId::HomeSkill => "Kỹ năng:",
         MessageId::HomeQuickActions => "Hành động nhanh",
         MessageId::HomeQuickLinks => "/links      - Các liên kết đến Dashboard & API",
@@ -2272,7 +2300,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config     - Mở trình chỉnh sửa cấu hình tương tác",
         MessageId::HomeQuickSettings => "/settings    - Hiển thị các cài đặt liên tục",
         MessageId::HomeQuickModel => "/model       - Xem hoặc chuyển đổi mô hình",
-        MessageId::HomeQuickSubagents => "/subagents   - Liệt kê trạng thái sub-agent",
+        MessageId::HomeQuickSubagents => "/fleet status - Trạng thái Fleet worker",
         MessageId::HomeQuickTaskList => "/task list   - Hiển thị hàng đợi nhiệm vụ ngầm",
         MessageId::HomeQuickHelp => "/help        - Hiển thị trợ giúp",
         MessageId::HomeModeTips => "Mẹo về Chế độ",
@@ -2372,6 +2400,18 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
             "{done} hoàn thành · {running} đang chạy · {failed} thất bại · {pending} chờ"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "Chọn cách CodeWhale hoạt động:",
+        MessageId::AppModeAgent => "Tác nhân",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "Kế hoạch",
+        MessageId::AppModeAgentHint => "Thực thi bình thường, hỏi trước khi thay đổi",
+        MessageId::AppModePlanHint => "Lập kế hoạch trước khi thực thi",
+        MessageId::AppModeYoloHint => "Tự động phê duyệt; bật shell (toàn quyền)",
+        MessageId::VimModeNormal => "-- BÌNH THƯỜNG --",
+        MessageId::VimModeInsert => "-- CHÈN --",
+        MessageId::VimModeVisual => "-- TRỰC QUAN --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "XEM XÉT",
         MessageId::ApprovalRiskDestructive => "NGUY HẠI",
@@ -2452,7 +2492,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::CtxInspNoSystemPrompt => "Chưa có lời nhắc hệ thống.",
         MessageId::CtxInspNoReferences => "Chưa có tham chiếu tệp, thư mục hoặc phương tiện nào.",
         MessageId::CtxInspNoToolActivity => "Chưa có hoạt động công cụ nào.",
-        MessageId::CtxInspAltVHint => "Mở thẻ phù hợp và nhấn Alt+V (hoặc v) để biết chi tiết.",
+        MessageId::CtxInspAltVHint => "Mở thẻ phù hợp và nhấn Alt+V để biết chi tiết.",
         MessageId::CtxInspCells => "ô",
         MessageId::CtxInspApiMessages => "tin nhắn API",
         MessageId::CtxInspActive => "đang hoạt động",
@@ -2537,6 +2577,18 @@ fn traditional_chinese(id: MessageId) -> Option<&'static str> {
             "{done} 已完成 · {running} 運行中 · {failed} 失敗 · {pending} 等待中"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "選擇 CodeWhale 的運作方式：",
+        MessageId::AppModeAgent => "智能體",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "計畫",
+        MessageId::AppModeAgentHint => "正常執行，變更前需核准",
+        MessageId::AppModePlanHint => "先規劃，再執行",
+        MessageId::AppModeYoloHint => "自動核准；啟用 shell（完全存取）",
+        MessageId::VimModeNormal => "-- 一般 --",
+        MessageId::VimModeInsert => "-- 插入 --",
+        MessageId::VimModeVisual => "-- 可視 --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "審查",
         MessageId::ApprovalRiskDestructive => "破壞性",
@@ -2609,7 +2661,7 @@ fn traditional_chinese(id: MessageId) -> Option<&'static str> {
         MessageId::CtxInspNoSystemPrompt => "未設定系統提示。",
         MessageId::CtxInspNoReferences => "尚未記錄任何檔案、目錄或媒體引用。",
         MessageId::CtxInspNoToolActivity => "尚未記錄任何工具活動。",
-        MessageId::CtxInspAltVHint => "開啟對應的卡片並按 Alt+V（或 v）檢視詳細資訊。",
+        MessageId::CtxInspAltVHint => "開啟對應的卡片並按 Alt+V 檢視詳細資訊。",
         MessageId::CtxInspCells => "儲存格",
         MessageId::CtxInspApiMessages => "API 訊息",
         MessageId::CtxInspActive => "作用中",
@@ -2895,7 +2947,8 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CmdStatusDescription => "実行中のセッション状態を表示",
         MessageId::CmdStatuslineDescription => "フッターに表示する項目を設定",
-        MessageId::CmdSubagentsDescription => "サブエージェントの状態を一覧表示",
+        MessageId::CmdFleetDescription => "Fleet設定またはワーカー状態を開く",
+        MessageId::CmdSubagentsDescription => "/fleet status の互換ショートカット",
         MessageId::CmdSwarmDescription => {
             "マルチエージェントのファンアウトターンを実行（sequential | mixture | distill | deliberate）"
         }
@@ -3005,9 +3058,6 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::KbFuzzyFilePicker => "ファジーファイルピッカーを開く（Enter で @path を挿入）",
         MessageId::KbCompactInspector => "コンパクトなセッションコンテキスト検査ツールを開く",
         MessageId::KbLastMessagePager => "最後のメッセージのページャーを開く（入力が空の時）",
-        MessageId::KbSelectedDetails => {
-            "選択中のツールまたはメッセージの詳細を開く（入力が空の時）"
-        }
         MessageId::KbToolDetailsPager => "ツール詳細のページャーを開く",
         MessageId::KbThinkingPager => "Activity Detail を開く",
         MessageId::KbLiveTranscript => "ライブ会話履歴オーバーレイを開く（自動追尾スクロール）",
@@ -3049,7 +3099,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "ヒント: 表示されたプロバイダー用の環境変数を使うか、`codewhale auth set --provider <id>` でキーを保存してください。"
         }
-        MessageId::SubagentsFetching => "サブエージェントの状態を取得中...",
+        MessageId::SubagentsFetching => "Fleetワーカー状態を取得中...",
         MessageId::HelpUnknownCommand => "不明なコマンド: {topic}",
         MessageId::HomeDashboardTitle => "codewhale ホームダッシュボード",
         MessageId::HomeModel => "モデル：",
@@ -3058,7 +3108,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "履歴：",
         MessageId::HomeTokens => "トークン：",
         MessageId::HomeQueued => "キュー：",
-        MessageId::HomeSubagents => "サブエージェント：",
+        MessageId::HomeSubagents => "Fleetワーカー：",
         MessageId::HomeSkill => "スキル：",
         MessageId::HomeQuickActions => "クイックアクション",
         MessageId::HomeQuickLinks => "/links      - ダッシュボードと API リンク",
@@ -3066,7 +3116,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - インタラクティブな設定エディタを開く",
         MessageId::HomeQuickSettings => "/settings    - 永続化された設定を表示",
         MessageId::HomeQuickModel => "/model       - モデルを切り替え・確認",
-        MessageId::HomeQuickSubagents => "/subagents   - サブエージェントの状態を一覧",
+        MessageId::HomeQuickSubagents => "/fleet status - Fleetワーカー状態",
         MessageId::HomeQuickTaskList => "/task list   - バックグラウンドタスクキューを表示",
         MessageId::HomeQuickHelp => "/help        - ヘルプを表示",
         MessageId::HomeModeTips => "モードヒント",
@@ -3160,6 +3210,18 @@ fn japanese(id: MessageId) -> Option<&'static str> {
             "{done} 完了 · {running} 実行中 · {failed} 失敗 · {pending} 保留"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "CodeWhale の動作方法を選択してください:",
+        MessageId::AppModeAgent => "エージェント",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "プラン",
+        MessageId::AppModeAgentHint => "通常実行（変更前に承認を求めます）",
+        MessageId::AppModePlanHint => "実行前にまず計画します",
+        MessageId::AppModeYoloHint => "自動承認・シェル有効（フルアクセス）",
+        MessageId::VimModeNormal => "-- ノーマル --",
+        MessageId::VimModeInsert => "-- 挿入 --",
+        MessageId::VimModeVisual => "-- ビジュアル --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "確認",
         MessageId::ApprovalRiskDestructive => "破壊的操作",
@@ -3240,9 +3302,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
             "ファイル、ディレクトリ、メディアの参照はまだ記録されていません。"
         }
         MessageId::CtxInspNoToolActivity => "ツールアクティビティはまだ記録されていません。",
-        MessageId::CtxInspAltVHint => {
-            "該当するカードを開き、Alt+V（または v）を押すと詳細が表示されます。"
-        }
+        MessageId::CtxInspAltVHint => "該当するカードを開き、Alt+V を押すと詳細が表示されます。",
         MessageId::CtxInspCells => "セル",
         MessageId::CtxInspApiMessages => "API メッセージ",
         MessageId::CtxInspActive => "アクティブ",
@@ -3472,7 +3532,8 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::CmdStashDescription => "暂存或恢复输入草稿（Ctrl+S 暂存，/stash list|pop）",
         MessageId::CmdStatusDescription => "显示当前运行状态",
         MessageId::CmdStatuslineDescription => "配置底栏要显示哪些条目",
-        MessageId::CmdSubagentsDescription => "列出子代理状态",
+        MessageId::CmdFleetDescription => "打开 Fleet 设置或工作器状态",
+        MessageId::CmdSubagentsDescription => "/fleet status 的兼容快捷方式",
         MessageId::CmdSwarmDescription => {
             "运行多代理扇出轮次（sequential | mixture | distill | deliberate）"
         }
@@ -3572,7 +3633,6 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::KbFuzzyFilePicker => "打开模糊文件选择器（按 Enter 插入 @path）",
         MessageId::KbCompactInspector => "打开紧凑会话上下文检查器",
         MessageId::KbLastMessagePager => "打开最后一条消息的分页器（输入框为空时）",
-        MessageId::KbSelectedDetails => "打开选中工具或消息的详情（输入框为空时）",
         MessageId::KbToolDetailsPager => "打开工具详情分页器",
         MessageId::KbThinkingPager => "打开 Activity Detail",
         MessageId::KbLiveTranscript => "打开实时对话覆盖层（自动滚动尾随）",
@@ -3606,7 +3666,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "提示：使用所显示服务商的环境变量，或通过 `codewhale auth set --provider <id>` 保存密钥。"
         }
-        MessageId::SubagentsFetching => "正在获取子代理状态...",
+        MessageId::SubagentsFetching => "正在获取 Fleet 工作器状态...",
         MessageId::HelpUnknownCommand => "未知命令：{topic}",
         MessageId::HomeDashboardTitle => "codewhale 主面板",
         MessageId::HomeModel => "模型：",
@@ -3615,7 +3675,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "历史：",
         MessageId::HomeTokens => "令牌：",
         MessageId::HomeQueued => "队列：",
-        MessageId::HomeSubagents => "子代理：",
+        MessageId::HomeSubagents => "Fleet 工作器：",
         MessageId::HomeSkill => "技能：",
         MessageId::HomeQuickActions => "快捷操作",
         MessageId::HomeQuickLinks => "/links      - 控制台与 API 链接",
@@ -3623,7 +3683,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - 打开交互式配置编辑器",
         MessageId::HomeQuickSettings => "/settings    - 显示持久化设置",
         MessageId::HomeQuickModel => "/model       - 切换或查看模型",
-        MessageId::HomeQuickSubagents => "/subagents   - 列出子代理状态",
+        MessageId::HomeQuickSubagents => "/fleet status - Fleet 工作器状态",
         MessageId::HomeQuickTaskList => "/task list   - 显示后台任务队列",
         MessageId::HomeQuickHelp => "/help        - 显示帮助",
         MessageId::HomeModeTips => "模式提示",
@@ -3705,6 +3765,18 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
             "{done} 已完成 · {running} 运行中 · {failed} 失败 · {pending} 等待中"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "选择 CodeWhale 的运行方式：",
+        MessageId::AppModeAgent => "智能体",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "计划",
+        MessageId::AppModeAgentHint => "正常执行，变更前需批准",
+        MessageId::AppModePlanHint => "先规划，再执行",
+        MessageId::AppModeYoloHint => "自动批准；启用 shell（完全访问）",
+        MessageId::VimModeNormal => "-- 普通 --",
+        MessageId::VimModeInsert => "-- 插入 --",
+        MessageId::VimModeVisual => "-- 可视 --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "审查",
         MessageId::ApprovalRiskDestructive => "破坏性",
@@ -3777,7 +3849,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::CtxInspNoSystemPrompt => "未设置系统提示。",
         MessageId::CtxInspNoReferences => "尚未记录任何文件、目录或媒体引用。",
         MessageId::CtxInspNoToolActivity => "尚未记录任何工具活动。",
-        MessageId::CtxInspAltVHint => "打开对应的卡片并按 Alt+V（或 v）查看详细信息。",
+        MessageId::CtxInspAltVHint => "打开对应的卡片并按 Alt+V 查看详细信息。",
         MessageId::CtxInspCells => "单元格",
         MessageId::CtxInspApiMessages => "API 消息",
         MessageId::CtxInspActive => "活动中",
@@ -4037,7 +4109,8 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CmdStatusDescription => "Exibir o status da sessão em execução",
         MessageId::CmdStatuslineDescription => "Configurar quais itens aparecem no rodapé",
-        MessageId::CmdSubagentsDescription => "Listar o status dos sub-agentes",
+        MessageId::CmdFleetDescription => "Abrir configuração Fleet ou status dos workers",
+        MessageId::CmdSubagentsDescription => "Atalho compatível para /fleet status",
         MessageId::CmdSwarmDescription => {
             "Executar turno fanout multi-agente (sequential | mixture | distill | deliberate)"
         }
@@ -4157,9 +4230,6 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::KbLastMessagePager => {
             "Abrir paginador para última mensagem (quando entrada vazia)"
         }
-        MessageId::KbSelectedDetails => {
-            "Abrir detalhes da ferramenta ou mensagem selecionada (quando entrada vazia)"
-        }
         MessageId::KbToolDetailsPager => "Abrir paginador de detalhes da ferramenta",
         MessageId::KbThinkingPager => "Abrir Activity Detail",
         MessageId::KbLiveTranscript => "Abrir sobreposição de transcrição ao vivo (auto-scroll)",
@@ -4199,7 +4269,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "Dica: use a variável de ambiente mostrada para seu provedor ou salve a chave com `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Buscando status dos sub-agentes...",
+        MessageId::SubagentsFetching => "Buscando status dos workers Fleet...",
         MessageId::HelpUnknownCommand => "Comando desconhecido: {topic}",
         MessageId::HomeDashboardTitle => "Painel Inicial do codewhale",
         MessageId::HomeModel => "Modelo:",
@@ -4208,7 +4278,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "Histórico:",
         MessageId::HomeTokens => "Tokens:",
         MessageId::HomeQueued => "Enfileirado:",
-        MessageId::HomeSubagents => "Sub-agentes:",
+        MessageId::HomeSubagents => "Workers Fleet:",
         MessageId::HomeSkill => "Skill:",
         MessageId::HomeQuickActions => "Ações Rápidas",
         MessageId::HomeQuickLinks => "/links      - Links do painel e API",
@@ -4216,7 +4286,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - Abrir editor interativo de configuração",
         MessageId::HomeQuickSettings => "/settings    - Exibir configurações persistentes",
         MessageId::HomeQuickModel => "/model       - Alternar ou visualizar modelo",
-        MessageId::HomeQuickSubagents => "/subagents   - Listar status dos sub-agentes",
+        MessageId::HomeQuickSubagents => "/fleet status - Status dos workers Fleet",
         MessageId::HomeQuickTaskList => "/task list   - Exibir fila de tarefas em segundo plano",
         MessageId::HomeQuickHelp => "/help        - Exibir ajuda",
         MessageId::HomeModeTips => "Dicas de Modo",
@@ -4316,6 +4386,18 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
             "{done} concluído · {running} em execução · {failed} falhou · {pending} pendente"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "Escolha como o CodeWhale deve operar:",
+        MessageId::AppModeAgent => "Agente",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "Plano",
+        MessageId::AppModeAgentHint => "Execução normal com aprovações",
+        MessageId::AppModePlanHint => "Planeje antes de executar",
+        MessageId::AppModeYoloHint => "Aprovação automática; shell habilitado",
+        MessageId::VimModeNormal => "-- NORMAL --",
+        MessageId::VimModeInsert => "-- INSERIR --",
+        MessageId::VimModeVisual => "-- VISUAL --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "REVISÃO",
         MessageId::ApprovalRiskDestructive => "DESTRUTIVO",
@@ -4399,7 +4481,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CtxInspNoToolActivity => "Nenhuma atividade de ferramenta registrada ainda.",
         MessageId::CtxInspAltVHint => {
-            "Abra o cartão correspondente e pressione Alt+V (ou v) para detalhes completos."
+            "Abra o cartão correspondente e pressione Alt+V para detalhes completos."
         }
         MessageId::CtxInspCells => "células",
         MessageId::CtxInspApiMessages => "mensagens da API",
@@ -4672,7 +4754,8 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::CmdStatuslineDescription => {
             "Configurar qué elementos aparecen en el pie de página"
         }
-        MessageId::CmdSubagentsDescription => "Listar el estado de los sub-agentes",
+        MessageId::CmdFleetDescription => "Abrir configuración Fleet o estado de workers",
+        MessageId::CmdSubagentsDescription => "Atajo compatible para /fleet status",
         MessageId::CmdSwarmDescription => {
             "Ejecutar turno fanout multi-agente (sequential | mixture | distill | deliberate)"
         }
@@ -4794,9 +4877,6 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::KbLastMessagePager => {
             "Abrir paginador para el último mensaje (cuando la entrada está vacía)"
         }
-        MessageId::KbSelectedDetails => {
-            "Abrir detalles de la herramienta o mensaje seleccionado (cuando la entrada está vacía)"
-        }
         MessageId::KbToolDetailsPager => "Abrir paginador de detalles de la herramienta",
         MessageId::KbThinkingPager => "Abrir paginador de razonamiento",
         MessageId::KbLiveTranscript => "Abrir superposición de transcripción en vivo (auto-scroll)",
@@ -4838,7 +4918,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "Tip: usa la variable de entorno mostrada para tu proveedor o guarda la clave con `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Obteniendo estado de los sub-agentes...",
+        MessageId::SubagentsFetching => "Obteniendo estado de workers Fleet...",
         MessageId::HelpUnknownCommand => "Comando desconocido: {topic}",
         MessageId::HomeDashboardTitle => "Panel Inicial de codewhale",
         MessageId::HomeModel => "Modelo:",
@@ -4847,7 +4927,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "Historial:",
         MessageId::HomeTokens => "Tokens:",
         MessageId::HomeQueued => "En cola:",
-        MessageId::HomeSubagents => "Sub-agentes:",
+        MessageId::HomeSubagents => "Workers Fleet:",
         MessageId::HomeSkill => "Skill:",
         MessageId::HomeQuickActions => "Acciones Rápidas",
         MessageId::HomeQuickLinks => "/links      - Enlaces del panel y API",
@@ -4855,7 +4935,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - Abrir editor interactivo de configuración",
         MessageId::HomeQuickSettings => "/settings    - Mostrar configuraciones persistentes",
         MessageId::HomeQuickModel => "/model       - Alternar o visualizar modelo",
-        MessageId::HomeQuickSubagents => "/subagents   - Listar estado de los sub-agentes",
+        MessageId::HomeQuickSubagents => "/fleet status - Estado de workers Fleet",
         MessageId::HomeQuickTaskList => "/task list   - Mostrar fila de tareas en segundo plano",
         MessageId::HomeQuickHelp => "/help        - Mostrar ayuda",
         MessageId::HomeModeTips => "Tips de Modo",
@@ -4951,6 +5031,18 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
             "{done} completado · {running} ejecutando · {failed} falló · {pending} pendiente"
         }
 
+        // App mode picker (prompt, names, hints) and composer vim indicator.
+        MessageId::ModePickerPrompt => "Elige cómo debe funcionar CodeWhale:",
+        MessageId::AppModeAgent => "Agente",
+        MessageId::AppModeYolo => "YOLO",
+        MessageId::AppModePlan => "Plan",
+        MessageId::AppModeAgentHint => "Ejecución normal con aprobaciones",
+        MessageId::AppModePlanHint => "Planifica antes de ejecutar",
+        MessageId::AppModeYoloHint => "Aprobación automática; shell habilitado",
+        MessageId::VimModeNormal => "-- NORMAL --",
+        MessageId::VimModeInsert => "-- INSERTAR --",
+        MessageId::VimModeVisual => "-- VISUAL --",
+
         // Approval dialog.
         MessageId::ApprovalRiskReview => "REVISAR",
         MessageId::ApprovalRiskDestructive => "DESTRUCTIVO",
@@ -5034,7 +5126,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CtxInspNoToolActivity => "Aún no se ha registrado actividad de herramientas.",
         MessageId::CtxInspAltVHint => {
-            "Abra la tarjeta correspondiente y presione Alt+V (o v) para ver los detalles completos."
+            "Abra la tarjeta correspondiente y presione Alt+V para ver los detalles completos."
         }
         MessageId::CtxInspCells => "celdas",
         MessageId::CtxInspApiMessages => "mensajes de API",
@@ -5151,6 +5243,34 @@ mod tests {
                 "{} is missing messages",
                 locale.tag()
             );
+        }
+    }
+
+    #[test]
+    fn mode_picker_strings_are_translated_in_non_english_locales() {
+        // The picker prompt and the three mode hints are full sentences; every
+        // shipped non-English locale must provide a real translation rather than
+        // leaking the English string through the fallback chain.
+        let sentences = [
+            MessageId::ModePickerPrompt,
+            MessageId::AppModeAgentHint,
+            MessageId::AppModePlanHint,
+            MessageId::AppModeYoloHint,
+        ];
+        for locale in Locale::shipped() {
+            if *locale == Locale::En {
+                continue;
+            }
+            for id in sentences {
+                let localized = tr(*locale, id);
+                assert!(!localized.is_empty(), "{} empty for {id:?}", locale.tag());
+                assert_ne!(
+                    localized,
+                    tr(Locale::En, id),
+                    "{} should translate {id:?}",
+                    locale.tag()
+                );
+            }
         }
     }
 

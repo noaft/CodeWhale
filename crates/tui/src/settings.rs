@@ -398,6 +398,32 @@ impl Default for Settings {
     }
 }
 
+/// The `calm` transcript preset (#3478): a coherent "beautiful/calm" bundle that
+/// favors a quiet, readable transcript over debug-dense output. Presentation
+/// only, and evidence-preserving — `show_thinking` is deliberately left untouched
+/// (thinking stays visible) and tool runs only have their inline detail
+/// collapsed, never hidden. Keyed by [`Settings::set`] names so the preset and a
+/// single-key `/config` set share one validation path.
+pub const CALM_PRESET_FIELDS: &[(&str, &str)] = &[
+    ("calm_mode", "true"),
+    ("tool_collapse", "calm"),
+    ("transcript_spacing", "comfortable"),
+    ("low_motion", "true"),
+    ("fancy_animations", "false"),
+    ("show_tool_details", "false"),
+];
+
+/// The `(key, value)` fields a named preset applies, or `None` for an unknown
+/// name. Single source of truth shared by [`Settings::apply_preset`] and the
+/// `/config preset` command so the bundle is never defined twice.
+#[must_use]
+pub fn preset_fields(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "calm" => Some(CALM_PRESET_FIELDS),
+        _ => None,
+    }
+}
+
 impl Settings {
     /// Get the canonical settings file path.
     ///
@@ -841,6 +867,30 @@ impl Settings {
         Ok(())
     }
 
+    /// Apply a named settings preset (#3478).
+    ///
+    /// Presets are the first bundled-settings mechanism: a single name applies a
+    /// coherent group of presentation knobs. `calm` is the "beautiful/calm
+    /// transcript" preset — it quiets motion and verbose tool output while
+    /// **keeping evidence reachable**: thinking stays visible and tool runs stay
+    /// expandable (only their inline detail is collapsed), so maintainer/release
+    /// work is never blind to failures. Presentation only — no model, provider,
+    /// routing, or safety setting is touched. Reuses [`Settings::set`] so each
+    /// field goes through the same validation as a single-key set.
+    ///
+    /// Returns the keys changed, or an error for an unknown preset.
+    pub fn apply_preset(&mut self, name: &str) -> Result<Vec<&'static str>> {
+        let Some(bundle) = preset_fields(name) else {
+            anyhow::bail!("Unknown preset '{}'. Available presets: calm", name.trim());
+        };
+        let mut changed = Vec::with_capacity(bundle.len());
+        for (key, value) in bundle {
+            self.set(key, value)?;
+            changed.push(*key);
+        }
+        Ok(changed)
+    }
+
     /// Get all settings as a displayable string
     pub fn display(&self, locale: crate::localization::Locale) -> String {
         use crate::localization::{MessageId, tr};
@@ -1104,6 +1154,18 @@ impl Settings {
     #[must_use]
     pub fn synchronized_output_enabled(&self) -> bool {
         !self.synchronized_output.eq_ignore_ascii_case("off")
+    }
+
+    /// Runtime bracketed-paste mode after terminal-host quirks are applied.
+    ///
+    /// This deliberately does not mutate [`Settings::bracketed_paste`]:
+    /// `apply_env_overrides()` can run before saving settings, and a legacy
+    /// conhost runtime fallback must not permanently disable bracketed paste
+    /// when the same config is later used in Windows Terminal or another
+    /// modern terminal.
+    #[must_use]
+    pub fn effective_bracketed_paste(&self) -> bool {
+        self.bracketed_paste && !detected_legacy_windows_console_host()
     }
 }
 
@@ -1442,6 +1504,45 @@ fn env_truthy(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_preset_calm_sets_bundle_and_preserves_evidence() {
+        let mut settings = Settings::default();
+        // Defaults are the debug-visible posture.
+        assert!(!settings.calm_mode);
+        assert!(settings.show_thinking);
+
+        let changed = settings.apply_preset("CALM").expect("calm preset applies");
+        assert_eq!(
+            changed,
+            CALM_PRESET_FIELDS
+                .iter()
+                .map(|(k, _)| *k)
+                .collect::<Vec<_>>()
+        );
+
+        assert!(settings.calm_mode);
+        assert_eq!(settings.tool_collapse_mode, "calm");
+        assert_eq!(settings.transcript_spacing, "comfortable");
+        assert!(settings.low_motion);
+        assert!(!settings.fancy_animations);
+        assert!(!settings.show_tool_details);
+        // Evidence preserved: the calm preset must NOT hide thinking — it only
+        // quiets motion and verbose tool detail.
+        assert!(
+            settings.show_thinking,
+            "calm preset must keep thinking visible"
+        );
+    }
+
+    #[test]
+    fn apply_preset_rejects_unknown_name() {
+        let mut settings = Settings::default();
+        let err = settings.apply_preset("turbo").expect_err("unknown preset");
+        assert!(err.to_string().contains("Unknown preset"));
+        assert!(preset_fields("calm").is_some());
+        assert!(preset_fields("turbo").is_none());
+    }
 
     #[test]
     fn default_settings_keep_auto_compact_as_unset_fallback() {
@@ -2222,6 +2323,14 @@ mod tests {
         settings.apply_env_overrides();
         assert!(settings.low_motion);
         assert!(!settings.fancy_animations);
+        assert!(
+            settings.bracketed_paste,
+            "env-only conhost fallback must not persistently mutate bracketed_paste (#1102)"
+        );
+        assert!(
+            !settings.effective_bracketed_paste(),
+            "legacy Windows console hosts do not support crossterm bracketed paste (#1102)"
+        );
         assert_eq!(settings.synchronized_output, "off");
 
         // SAFETY: cleanup under the guard.

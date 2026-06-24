@@ -31,7 +31,6 @@ use super::app::{
 use super::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus, summarize_tool_output};
 use super::subagent_routing::active_fanout_counts;
 use super::ui_text::{concise_shell_command_label, truncate_line_to_width};
-use crate::config::provider_capability;
 
 /// Tolerance for floating-point cost comparison in the sidebar breakdown.
 /// Must be large enough that accumulated f64 error across hundreds of turns
@@ -1718,8 +1717,8 @@ fn shell_summary_for_sidebar(
 ) -> String {
     if status == ToolStatus::Failed && looks_like_pending_ci(command, output_summary, output) {
         return format!(
-            "Waiting for CI \u{00B7} {} details",
-            crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
+            "Waiting for CI \u{00B7} {}",
+            crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details")
         );
     }
 
@@ -1765,10 +1764,7 @@ fn looks_like_pending_ci(
 }
 
 fn failure_summary_with_hint(summary: &str) -> String {
-    let hint = format!(
-        "inspect details with {}",
-        crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
-    );
+    let hint = crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details");
     if summary.trim().is_empty() {
         hint
     } else if summary.contains(&hint) {
@@ -2009,8 +2005,8 @@ fn editorial_tool_rows(
             let command = row.name.clone();
             row.name = "Waiting for CI".to_string();
             row.summary = format!(
-                "{command} \u{00B7} {count} polls collapsed \u{00B7} {} details",
-                crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
+                "{command} \u{00B7} {count} polls collapsed \u{00B7} {}",
+                crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details")
             );
             row.status = ToolStatus::Running;
         }
@@ -2462,8 +2458,9 @@ pub fn subagent_panel_lines(
 }
 
 /// Build the Agents panel lines together with a parallel per-line
-/// click-action vector (#3028). Agent label rows open the agents view via
-/// `/subagents`; header, role-mix, detail, and RLM lines are not clickable.
+/// click-action vector (#3028). Agent label rows open the Fleet worker status
+/// view via `/fleet status`; header, role-mix, detail, and RLM lines are not
+/// clickable.
 fn subagent_panel_rows(
     summary: &SidebarSubagentSummary,
     rows: &[SidebarAgentRow],
@@ -2539,7 +2536,7 @@ fn subagent_panel_rows(
             truncate_line_to_width(&label, content_width.max(1)),
             Style::default().fg(color),
         )));
-        actions.push(Some("/subagents".to_string()));
+        actions.push(Some("/fleet status".to_string()));
 
         // Auto-collapse finished sub-agents: hide detail lines for completed
         // agents so the sidebar stays compact when work is done.
@@ -2775,7 +2772,11 @@ fn render_context_panel(f: &mut Frame, area: Rect, app: &mut App) {
 
     // ── Token usage ──────────────────────────────────────────────
     let total_tokens = app.session.total_conversation_tokens;
-    let window = provider_capability(app.api_provider, &app.model).context_window;
+    let window = crate::route_budget::route_context_window_tokens(
+        app.api_provider,
+        app.effective_model_for_budget(),
+        app.active_route_limits,
+    );
     let pct = if window > 0 {
         ((total_tokens as f64 / window as f64) * 100.0).clamp(0.0, 100.0)
     } else {
@@ -4411,7 +4412,7 @@ mod tests {
             .iter()
             .position(|line| line.contains("investigator"))
             .expect("agent label row");
-        assert_eq!(actions[agent_idx].as_deref(), Some("/subagents"));
+        assert_eq!(actions[agent_idx].as_deref(), Some("/fleet status"));
         assert!(
             actions[agent_idx + 1].is_none(),
             "agent detail row has no action"
@@ -4422,7 +4423,7 @@ mod tests {
     fn subagent_panel_actions_skip_role_mix_slot_for_progress_only_agents() {
         // Progress-only agents have no cached role counts, so there is no
         // role-mix line — the first agent row sits directly under the count
-        // header and must still resolve to /subagents (#3028 audit fix).
+        // header and must still resolve to /fleet status (#3028 audit fix).
         let summary = SidebarSubagentSummary {
             progress_only_count: 1,
             ..SidebarSubagentSummary::default()
@@ -4454,7 +4455,7 @@ mod tests {
             agent_idx, 1,
             "no role-mix line should be emitted without role counts: {text:?}"
         );
-        assert_eq!(actions[agent_idx].as_deref(), Some("/subagents"));
+        assert_eq!(actions[agent_idx].as_deref(), Some("/fleet status"));
     }
 
     #[test]
@@ -4723,10 +4724,9 @@ mod tests {
             "failed shell command should keep its concise label: {text:?}"
         );
         assert!(
-            text.iter().any(|line| line.contains(&format!(
-                "inspect details with {}",
-                crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
-            ))),
+            text.iter().any(|line| line.contains(
+                &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details")
+            )),
             "failed row should include the next action: {text:?}"
         );
     }

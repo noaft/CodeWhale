@@ -310,6 +310,9 @@ impl ExecPolicyEngine {
 
     fn matching_ask_rule(&self, ctx: &ExecPolicyContext<'_>) -> Option<ToolAskRule> {
         let tool = ctx.tool.unwrap_or("exec_shell");
+        let normalized_path = ctx
+            .path
+            .and_then(|path| normalize_workspace_relative_path(path, ctx.cwd));
 
         self.rulesets
             .iter()
@@ -325,9 +328,13 @@ impl ExecPolicyEngine {
                 None => true,
             })
             .filter(|(_, rule)| match (rule.path.as_deref(), ctx.path) {
-                (Some(pattern), Some(path)) => {
-                    normalize_path_value(pattern) == normalize_path_value(path)
-                }
+                (Some(pattern), Some(_)) => match (
+                    normalize_workspace_relative_path(pattern, ctx.cwd),
+                    normalized_path.as_deref(),
+                ) {
+                    (Some(pattern), Some(path)) => pattern == path,
+                    _ => false,
+                },
                 (Some(_), None) => false,
                 (None, _) => true,
             })
@@ -493,12 +500,86 @@ fn first_token(command: &str) -> String {
         .to_string()
 }
 
-fn normalize_path_value(value: &str) -> String {
-    value
-        .replace('\\', "/")
-        .trim()
-        .trim_matches('/')
-        .to_ascii_lowercase()
+/// Returns a slash-separated path relative to `workspace_root` when `value` is
+/// a safe path within that workspace.
+///
+/// Paths are normalized lexically so matching does not depend on the host OS
+/// or require the path to exist. A `..` segment is rejected rather than
+/// collapsed, preventing traversal from becoming matchable. Absolute paths
+/// must have the workspace as a whole-component prefix; relative paths are
+/// interpreted as workspace-relative. Backslashes are accepted so persisted
+/// rules and tool inputs behave consistently on Windows.
+///
+/// This is the canonical normalization shared by ask-rule matching and rule
+/// persistence: callers that save a file ask rule should store the value this
+/// returns so the saved path matches the same invocation later. `None` means
+/// the path is empty, traversing, drive-relative, or outside the workspace and
+/// must not be turned into a rule.
+pub fn normalize_workspace_relative_path(value: &str, workspace_root: &str) -> Option<String> {
+    let path = parse_path_for_matching(value)?;
+    let workspace = parse_path_for_matching(workspace_root)?;
+    let workspace_root = workspace.root.as_ref()?;
+
+    let relative_components = match path.root.as_ref() {
+        Some(path_root) => {
+            if path_root != workspace_root {
+                return None;
+            }
+            path.components.strip_prefix(&workspace.components[..])?
+        }
+        None => path.components.as_slice(),
+    };
+
+    Some(relative_components.join("/"))
+}
+
+#[derive(Debug)]
+struct PathForMatching {
+    root: Option<String>,
+    components: Vec<String>,
+}
+
+fn parse_path_for_matching(value: &str) -> Option<PathForMatching> {
+    let value = value.trim().replace('\\', "/").to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+
+    let (root, components) = if let Some(path) = value.strip_prefix('/') {
+        (Some("/".to_string()), path)
+    } else if is_windows_absolute_path(&value) {
+        (Some(value[..2].to_string()), &value[3..])
+    } else if has_windows_drive_prefix(&value) {
+        // `C:foo` is drive-relative on Windows. Treating it as a
+        // workspace-relative path could match outside the workspace.
+        return None;
+    } else {
+        (None, value.as_str())
+    };
+
+    let mut normalized_components = Vec::new();
+    for component in components.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return None,
+            component => normalized_components.push(component.to_string()),
+        }
+    }
+
+    Some(PathForMatching {
+        root,
+        components: normalized_components,
+    })
+}
+
+fn is_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn has_windows_drive_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn ask_rule_specificity(rule: &ToolAskRule) -> usize {
@@ -827,11 +908,14 @@ mod tests {
     }
 
     #[test]
-    fn typed_ask_path_matching_trims_spaces_before_boundary_slashes() {
-        let engine = ExecPolicyEngine::with_rulesets(vec![
-            Ruleset::user(vec![], vec![])
-                .with_ask_rules(vec![ToolAskRule::file_path("edit_file", " /TMP/PROJECT/ ")]),
-        ]);
+    fn typed_ask_path_matching_trims_spaces_before_workspace_normalization() {
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule::file_path(
+                    "edit_file",
+                    " /workspace/tmp/project/ ",
+                )],
+            )]);
 
         let decision = engine
             .check(ExecPolicyContext {
@@ -847,7 +931,93 @@ mod tests {
         assert!(!decision.allow);
         assert_eq!(
             decision.matched_rule.as_deref(),
-            Some("tool=edit_file path= /TMP/PROJECT/ ")
+            Some("tool=edit_file path= /workspace/tmp/project/ ")
         );
+    }
+
+    #[test]
+    fn typed_ask_path_matching_normalizes_relative_and_absolute_workspace_paths() {
+        let relative_rule = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![])
+                .with_ask_rules(vec![ToolAskRule::file_path("edit_file", "src/a.rs")]),
+        ]);
+        let absolute_path = relative_rule
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/workspace/src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert!(absolute_path.requires_approval);
+
+        let absolute_rule =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule::file_path("edit_file", "/workspace/src/a.rs")],
+            )]);
+        let relative_path = absolute_rule
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert!(relative_path.requires_approval);
+    }
+
+    #[test]
+    fn typed_ask_path_matching_rejects_traversal_and_external_paths() {
+        for (rule_path, path) in [
+            ("src/a.rs", "../src/a.rs"),
+            ("src/a.rs", "/workspace/src/../src/a.rs"),
+            ("src/a.rs", "/src/a.rs"),
+            ("../src/a.rs", "src/a.rs"),
+            ("/src/a.rs", "src/a.rs"),
+        ] {
+            let engine = ExecPolicyEngine::with_rulesets(vec![
+                Ruleset::user(vec![], vec![])
+                    .with_ask_rules(vec![ToolAskRule::file_path("edit_file", rule_path)]),
+            ]);
+            let decision = engine
+                .check(ExecPolicyContext {
+                    command: "",
+                    cwd: "/workspace",
+                    tool: Some("edit_file"),
+                    path: Some(path),
+                    ask_for_approval: AskForApproval::OnFailure,
+                    sandbox_mode: Some("workspace-write"),
+                })
+                .unwrap();
+            assert_eq!(
+                decision.matched_rule, None,
+                "rule {rule_path:?} and path {path:?} must not match"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_ask_path_matching_accepts_windows_separators() {
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![])
+                .with_ask_rules(vec![ToolAskRule::file_path("edit_file", r"src\a.rs")]),
+        ]);
+
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: r"C:\workspace",
+                tool: Some("edit_file"),
+                path: Some(r"C:\workspace\src\a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+
+        assert!(decision.requires_approval);
     }
 }

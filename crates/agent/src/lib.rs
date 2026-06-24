@@ -699,7 +699,7 @@ impl Default for ModelRegistry {
             },
             // MiniMax 2.7 (OpenRouter)
             ModelInfo {
-                id: "minimax/minimax-2.7".to_string(),
+                id: "minimax/minimax-m2.7".to_string(),
                 provider: ProviderKind::Openrouter,
                 aliases: vec![
                     "minimax-2.7".to_string(),
@@ -1506,7 +1506,7 @@ mod tests {
             ("glm-5.1", "z-ai/glm-5.1"),
             ("glm-5.2", "z-ai/glm-5.2"),
             ("minimax-m3", "minimax/minimax-m3"),
-            ("minimax-2.7", "minimax/minimax-2.7"),
+            ("minimax-2.7", "minimax/minimax-m2.7"),
             ("openrouter-mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro"),
             ("openrouter-kimi-k2.7-code", "moonshotai/kimi-k2.7-code"),
             ("openrouter-kimi-k2.6", "moonshotai/kimi-k2.6"),

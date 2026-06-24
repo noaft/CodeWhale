@@ -99,7 +99,7 @@ fn deepseek_api_key_reads_metadata_env_vars_for_newer_providers() -> Result<()> 
 fn missing_provider_api_key_message_uses_provider_metadata() -> Result<()> {
     let message = missing_provider_api_key_message(ApiProvider::Zai)?;
 
-    assert!(message.contains("Z.ai (GLM Coding) API key not found"));
+    assert!(message.contains("Zhipu AI / Z.ai API key not found"));
     assert!(message.contains("https://z.ai/model-api"));
     assert!(message.contains("ZAI_API_KEY / Z_AI_API_KEY"));
     assert!(message.contains("[providers.zai] api_key"));
@@ -3029,7 +3029,7 @@ fn normalize_model_name_for_provider_maps_recent_openrouter_aliases() {
         ("kimi", OPENROUTER_KIMI_K2_7_CODE_MODEL),
         ("kimi-k2.6", OPENROUTER_KIMI_K2_6_MODEL),
         ("minimax-m3", OPENROUTER_MINIMAX_M3_MODEL),
-        ("minimax-2.7", OPENROUTER_MINIMAX_2_7_MODEL),
+        ("minimax-2.7", OPENROUTER_MINIMAX_M2_7_MODEL),
         ("gemma-4-31b-it", OPENROUTER_GEMMA_4_31B_MODEL),
         ("glm-5.1", OPENROUTER_GLM_5_1_MODEL),
         ("glm-5.2", OPENROUTER_GLM_5_2_MODEL),
@@ -3186,7 +3186,7 @@ fn model_completion_names_for_openrouter_include_recent_large_models() {
         OPENROUTER_ARCEE_TRINITY_LARGE_THINKING_MODEL,
         OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL,
         OPENROUTER_MINIMAX_M3_MODEL,
-        OPENROUTER_MINIMAX_2_7_MODEL,
+        OPENROUTER_MINIMAX_M2_7_MODEL,
         OPENROUTER_QWEN_3_6_FLASH_MODEL,
         OPENROUTER_QWEN_3_6_35B_A3B_MODEL,
         OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL,
@@ -3618,6 +3618,19 @@ fn nvidia_nim_provider_normalizes_deepseek_v4_pro_alias() -> Result<()> {
 
 #[test]
 fn nvidia_nim_provider_normalizes_deepseek_v4_flash_alias() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-nim-flash-model-alias-test-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
     let config = Config {
         provider: Some("nvidia-nim".to_string()),
         default_text_model: Some("deepseek-v4-flash".to_string()),
@@ -6280,7 +6293,7 @@ fn provider_capability_openrouter_recent_large_models_are_reasoning_aware() {
         (OPENROUTER_QWEN_3_6_PLUS_MODEL, 1_000_000, 65_536),
         (OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL, 1_000_000, 131_072),
         (OPENROUTER_MINIMAX_M3_MODEL, 1_000_000, 524_288),
-        (OPENROUTER_MINIMAX_2_7_MODEL, 204_800, 4096),
+        (OPENROUTER_MINIMAX_M2_7_MODEL, 204_800, 4096),
         (OPENROUTER_GLM_5_1_MODEL, 202_752, 131_072),
         (OPENROUTER_GLM_5_2_MODEL, 1_000_000, 131_072),
         (OPENROUTER_NEMOTRON_3_ULTRA_MODEL, 1_000_000, 16_384),
@@ -6839,4 +6852,129 @@ fn huggingface_short_env_fallbacks_configure_route() -> Result<()> {
     assert_eq!(config.deepseek_base_url(), "https://short-hf.example/v1");
     assert_eq!(config.default_model(), "org/short-model");
     Ok(())
+}
+
+// === #1519 custom OpenAI-compatible provider slice ===
+
+#[test]
+fn custom_provider_flatten_map_parses_alongside_named_provider() {
+    // A custom `[providers.my_thing]` table lands in the flatten map while a
+    // built-in `[providers.openai]` table still binds its named field.
+    let config: Config = toml::from_str(
+        r#"
+provider = "my_thing"
+
+[providers.openai]
+api_key = "openai-key"
+
+[providers.my_thing]
+kind = "openai-compatible"
+base_url = "https://api.example.com/v1"
+model = "custom-model-v1"
+api_key_env = "EXAMPLE_API_KEY"
+"#,
+    )
+    .expect("config with a custom provider table should parse");
+
+    let providers = config.providers.as_ref().expect("providers table present");
+    // Built-in named field still works.
+    assert_eq!(providers.openai.api_key.as_deref(), Some("openai-key"));
+    // The custom entry is captured by name in the flatten map.
+    let custom = providers
+        .custom_provider_config("my_thing")
+        .expect("custom entry parsed into flatten map");
+    assert_eq!(custom.kind.as_deref(), Some("openai-compatible"));
+    assert_eq!(
+        custom.base_url.as_deref(),
+        Some("https://api.example.com/v1")
+    );
+    assert_eq!(custom.model.as_deref(), Some("custom-model-v1"));
+    assert_eq!(custom.api_key_env.as_deref(), Some("EXAMPLE_API_KEY"));
+    assert!(custom.is_openai_compatible_custom());
+    // A built-in provider name never leaks into the custom map.
+    assert!(providers.custom_provider_config("openai").is_none());
+}
+
+#[test]
+fn api_provider_returns_custom_for_custom_name_and_deepseek_for_junk() {
+    // Names a real custom table → Custom (the #1519 silent-misroute fix).
+    let mut custom = HashMap::new();
+    custom.insert(
+        "my_thing".to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("https://api.example.com/v1".to_string()),
+            ..Default::default()
+        },
+    );
+    let config = Config {
+        provider: Some("my_thing".to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    assert_eq!(config.api_provider(), ApiProvider::Custom);
+
+    // Genuine junk that matches no built-in provider AND no custom table →
+    // falls back to DeepSeek, exactly as before this slice.
+    let junk = Config {
+        provider: Some("totally-not-a-provider".to_string()),
+        ..Config::default()
+    };
+    assert_eq!(junk.api_provider(), ApiProvider::Deepseek);
+}
+
+#[test]
+fn custom_provider_kind_only_accepts_openai_compatible() {
+    let ok = ProviderConfig {
+        kind: Some("openai-compatible".to_string()),
+        ..Default::default()
+    };
+    assert!(ok.is_openai_compatible_custom());
+
+    // Underscore spelling and case are tolerated.
+    let underscore = ProviderConfig {
+        kind: Some("OpenAI_Compatible".to_string()),
+        ..Default::default()
+    };
+    assert!(underscore.is_openai_compatible_custom());
+
+    // Any other declared wire format is rejected (callers error on these).
+    let other = ProviderConfig {
+        kind: Some("anthropic-messages".to_string()),
+        ..Default::default()
+    };
+    assert!(!other.is_openai_compatible_custom());
+
+    // Built-in providers leave `kind` unset.
+    assert!(!ProviderConfig::default().is_openai_compatible_custom());
+}
+
+#[test]
+fn custom_provider_base_url_and_model_resolve_from_named_table() {
+    let mut custom = HashMap::new();
+    custom.insert(
+        "my_thing".to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("https://api.example.com/v1".to_string()),
+            model: Some("custom-model-v1".to_string()),
+            ..Default::default()
+        },
+    );
+    let config = Config {
+        provider: Some("my_thing".to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+
+    // Resolution reads the named table, not a DeepSeek default.
+    assert_eq!(config.api_provider(), ApiProvider::Custom);
+    assert_eq!(config.deepseek_base_url(), "https://api.example.com/v1");
+    assert_eq!(config.default_model(), "custom-model-v1");
 }

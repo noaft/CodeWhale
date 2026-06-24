@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::{
-    ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, ProviderConfig,
-    ProvidersConfig,
+    ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL,
+    ProviderConfig, ProvidersConfig,
 };
 use crate::config_ui::{self, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::mock_engine_handle;
@@ -239,6 +239,30 @@ fn recover_terminal_modes_emits_expected_csi_sequences_with_gating() {
         !off.contains("\x1b[?2004h"),
         "EnableBracketedPaste must be gated by use_bracketed_paste"
     );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn bracketed_paste_mode_helpers_ignore_writer_errors() {
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("terminal mode unsupported"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("terminal mode unsupported"))
+        }
+    }
+
+    let mut writer = FailingWriter;
+
+    assert!(
+        !try_enable_bracketed_paste_mode(&mut writer),
+        "unsupported bracketed paste must be reported without bubbling an error"
+    );
+    disable_bracketed_paste_mode(&mut writer);
 }
 
 #[cfg(windows)]
@@ -2232,7 +2256,7 @@ fn active_tool_status_label_summarizes_live_tool_group() {
     assert!(label.contains("1 active"));
     assert!(label.contains("1 done"));
     assert!(label.contains(crate::tui::key_shortcuts::tool_details_shortcut_label()));
-    assert!(label.contains("/v"));
+    assert!(label.contains("opens details"));
 }
 
 #[test]
@@ -2506,10 +2530,20 @@ async fn model_change_update_syncs_engine_model_before_compaction() {
     let compaction = app.compaction_config();
     let mut engine = crate::core::engine::mock_engine_handle();
 
-    apply_model_and_compaction_update(&engine.handle, compaction, app.mode).await;
+    apply_model_and_compaction_update(
+        &engine.handle,
+        compaction,
+        app.mode,
+        app.active_route_limits,
+    )
+    .await;
 
     match engine.rx_op.recv().await.expect("set model op") {
-        crate::core::ops::Op::SetModel { model, mode } => {
+        crate::core::ops::Op::SetModel {
+            model,
+            mode,
+            route_limits: _,
+        } => {
             assert_eq!(model, "deepseek-v4-flash");
             assert_eq!(mode, app.mode);
         }
@@ -2833,6 +2867,113 @@ async fn provider_switch_model_override_updates_target_provider_model_slot() {
             .as_ref()
             .and_then(|providers| providers.xiaomi_mimo.model.as_deref()),
         Some("mimo-v2.5-pro")
+    );
+}
+
+#[tokio::test]
+async fn provider_switch_without_model_uses_target_default_not_previous_provider_model() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Openrouter;
+    app.model = "deepseek/deepseek-v4-pro".to_string();
+    app.model_ids_passthrough = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("openrouter".to_string()),
+        api_key: Some("deepseek-key".to_string()),
+        providers: Some(ProvidersConfig {
+            openrouter: ProviderConfig {
+                api_key: Some("openrouter-key".to_string()),
+                model: Some("deepseek/deepseek-v4-pro".to_string()),
+                ..Default::default()
+            },
+            zai: ProviderConfig {
+                api_key: Some("zai-key".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    switch_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApiProvider::Zai,
+        None,
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Zai);
+    assert_eq!(app.model, DEFAULT_ZAI_MODEL);
+    assert_eq!(config.provider.as_deref(), Some("zai"));
+    assert_eq!(
+        config
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.zai.model.as_deref()),
+        Some(DEFAULT_ZAI_MODEL)
+    );
+    assert_eq!(
+        config
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.openrouter.model.as_deref()),
+        Some("deepseek/deepseek-v4-pro")
+    );
+}
+
+#[tokio::test]
+async fn provider_switch_foreign_direct_model_rejected_before_mutation() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = DEFAULT_TEXT_MODEL.to_string();
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some("deepseek-key".to_string()),
+        providers: Some(ProvidersConfig {
+            deepseek: ProviderConfig {
+                api_key: Some("deepseek-key".to_string()),
+                model: Some(DEFAULT_TEXT_MODEL.to_string()),
+                ..Default::default()
+            },
+            zai: ProviderConfig {
+                api_key: Some("zai-key".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    switch_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApiProvider::Zai,
+        Some("deepseek-v4-pro".to_string()),
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(app.model, DEFAULT_TEXT_MODEL);
+    assert_eq!(config.provider.as_deref(), Some("deepseek"));
+    assert_eq!(
+        config
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.zai.model.as_deref()),
+        None
+    );
+    assert!(app.pending_provider_switch.is_none());
+    assert!(
+        app.status_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Route rejected before provider switch")
     );
 }
 
@@ -6694,9 +6835,9 @@ fn detail_target_prefers_visible_tool_card() {
 
     assert_eq!(detail_target_cell_index(&app), Some(1));
     let expected = format!(
-        "{} Activity: find · {} raw",
+        "{} Activity: find · {}",
         crate::tui::key_shortcuts::activity_shortcut_label(),
-        crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
+        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("raw details")
     );
     assert_eq!(
         selected_detail_footer_label(&app).as_deref(),
@@ -6749,9 +6890,9 @@ fn activity_footer_hint_uses_details_for_subagent_cards() {
     app.viewport.last_transcript_visible = 4;
 
     let expected = format!(
-        "{} Activity: sub-agent · {} details",
+        "{} Activity: sub-agent · {}",
         crate::tui::key_shortcuts::activity_shortcut_label(),
-        crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
+        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details")
     );
     assert_eq!(
         selected_detail_footer_label(&app).as_deref(),
@@ -9049,6 +9190,88 @@ fn recoverable_provider_error_advances_fallback_chain() {
             .as_deref()
             .unwrap_or_default()
             .contains("provider returned 429")
+    );
+}
+
+/// #2574 acceptance: auth (401) errors must never trigger provider fallback,
+/// even when marked recoverable — the exclusion is by error *category*, not
+/// recoverability (the gate lives at this call site, not inside the chain
+/// walk). A bad key requires user intervention, not a silent rotation.
+#[test]
+fn auth_error_does_not_trigger_provider_fallback() {
+    use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
+
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    // Not env-only, so we exercise the category gate rather than the env-key
+    // onboarding early-return.
+    app.api_key_env_only = false;
+    app.provider_chain = Some(codewhale_config::ProviderChain::new(
+        codewhale_config::ProviderKind::Deepseek,
+        &[codewhale_config::ProviderKind::Openrouter],
+    ));
+
+    apply_engine_error_to_app(
+        &mut app,
+        ErrorEnvelope::new(
+            ErrorCategory::Authentication,
+            ErrorSeverity::Critical,
+            // Deliberately recoverable to prove the *category* is what excludes
+            // fallback, not the recoverable flag.
+            true,
+            "authentication",
+            "provider returned 401",
+        ),
+    );
+
+    assert_eq!(
+        app.api_provider,
+        ApiProvider::Deepseek,
+        "auth failure must not rotate providers"
+    );
+    assert!(!app.is_fallback_active());
+    assert_eq!(app.fallback_chain_position(), Some(0));
+    assert!(
+        app.last_fallback_reason.is_none(),
+        "no fallback should have been attempted on an auth error"
+    );
+}
+
+/// #2574 acceptance: the route switch is visible to the user with a 1-based
+/// position and the failure cause (regression guard against off-by-one position
+/// indexing in the fallback status).
+#[test]
+fn fallback_switch_status_shows_one_based_position_and_reason() {
+    use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
+
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.provider_chain = Some(codewhale_config::ProviderChain::new(
+        codewhale_config::ProviderKind::Deepseek,
+        &[codewhale_config::ProviderKind::Openrouter],
+    ));
+
+    apply_engine_error_to_app(
+        &mut app,
+        ErrorEnvelope::new(
+            ErrorCategory::RateLimit,
+            ErrorSeverity::Warning,
+            true,
+            "rate_limit",
+            "provider returned 429",
+        ),
+    );
+
+    assert_eq!(app.api_provider, ApiProvider::Openrouter);
+    assert_eq!(
+        app.fallback_chain_position(),
+        Some(1),
+        "first fallback sits at 1-based position 1"
+    );
+    let status = app.status_message.as_deref().unwrap_or_default();
+    assert!(
+        status.contains("Switched to openrouter") && status.contains("(fallback 1/"),
+        "visible status must show the destination and 1-based position: {status}"
     );
 }
 

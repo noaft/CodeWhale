@@ -49,8 +49,8 @@ use crate::client::{
 use crate::commands;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
-    ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL, ProviderConfig, ProvidersConfig, StatusItem,
-    UpdateConfig, provider_capability, save_provider_auth_mode_for,
+    ApiProvider, Config, ProviderConfig, ProvidersConfig, StatusItem, UpdateConfig,
+    provider_capability, save_provider_auth_mode_for,
 };
 use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
@@ -62,6 +62,7 @@ use crate::localization::{MessageId, tr};
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 use crate::palette;
 use crate::prompts;
+use crate::route_runtime::{resolve_route_candidate, resolve_runtime_route};
 use crate::session_manager::{
     OfflineQueueState, QueuedSessionMessage, SavedSession, SessionManager,
     create_saved_session_with_id_and_mode, create_saved_session_with_mode, update_session,
@@ -871,7 +872,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
     if use_bracketed_paste {
-        execute!(terminal.backend_mut(), DisableBracketedPaste)?;
+        disable_bracketed_paste_mode(terminal.backend_mut());
     }
     terminal.show_cursor()?;
     drop(terminal);
@@ -1060,7 +1061,7 @@ impl Drop for TerminalCleanupGuard {
             let _ = execute!(stdout, DisableMouseCapture);
         }
         if self.use_bracketed_paste {
-            let _ = execute!(stdout, DisableBracketedPaste);
+            disable_bracketed_paste_mode(&mut stdout);
         }
         let _ = execute!(stdout, crossterm::cursor::Show);
     }
@@ -1116,6 +1117,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
     let max_subagents = app.max_subagents.clamp(1, crate::config::MAX_SUBAGENTS);
     EngineConfig {
         model: app.model.clone(),
+        active_route_limits: app.active_route_limits,
         workspace: app.workspace.clone(),
         allow_shell: app.allow_shell,
         trust_mode: app.trust_mode,
@@ -2762,7 +2764,7 @@ async fn run_event_loop(
                         let view_agents = subagent_view_agents(app, &app.subagent_cache);
                         if app.view_stack.update_subagents(&view_agents) {
                             app.status_message =
-                                Some(format!("Sub-agents: {} total", view_agents.len()));
+                                Some(format!("Fleet workers: {} total", view_agents.len()));
                         }
                         // Individual spawn/complete events already log to history;
                         // full list available via /agents command.
@@ -4397,6 +4399,7 @@ async fn run_event_loop(
                             .send(Op::SetModel {
                                 model: app.model.clone(),
                                 mode: app.mode,
+                                route_limits: app.active_route_limits,
                             })
                             .await;
                     }
@@ -5501,6 +5504,7 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
         previous_provider,
         previous_model,
         previous_model_ids_passthrough,
+        previous_route_limits,
         previous_config,
         previous_onboarding,
         previous_onboarding_needs_api_key,
@@ -5513,6 +5517,7 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
     app.provider_models
         .insert(previous_provider.as_str().to_string(), previous_model);
     app.model_ids_passthrough = previous_model_ids_passthrough;
+    app.active_route_limits = previous_route_limits;
     app.update_model_compaction_budget();
     app.clear_model_scoped_telemetry();
     app.offline_mode = false;
@@ -6379,11 +6384,13 @@ async fn apply_model_and_compaction_update(
     engine_handle: &EngineHandle,
     compaction: crate::compaction::CompactionConfig,
     mode: AppMode,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
 ) {
     let _ = engine_handle
         .send(Op::SetModel {
             model: compaction.model.clone(),
             mode,
+            route_limits,
         })
         .await;
     let _ = engine_handle
@@ -6412,6 +6419,7 @@ async fn drain_web_config_events(
                                 engine_handle,
                                 app.compaction_config(),
                                 app.mode,
+                                app.active_route_limits,
                             )
                             .await;
                         }
@@ -6437,6 +6445,7 @@ async fn drain_web_config_events(
                                 engine_handle,
                                 app.compaction_config(),
                                 app.mode,
+                                app.active_route_limits,
                             )
                             .await;
                         }
@@ -6518,25 +6527,36 @@ async fn apply_model_picker_choice(
         return;
     }
 
-    // Reject a model that does not belong to the active provider before we
-    // mutate session state or persist it (#3227/#3383). The provider-scoped
-    // picker should only emit active-provider rows; keep this guard as the
-    // in-session safety net. Explicit cross-provider route switches go through
-    // `switch_provider`, which validates the route atomically. Skip the strict
-    // check when the app accepts custom ids (pass-through provider or custom
-    // DeepSeek-compatible base URL) — the upstream is the authority there.
-    if model_changed
-        && !app.accepts_custom_model_ids()
-        && let Err(reason) = crate::config::validate_route(app.api_provider, &model)
-    {
-        app.status_message = Some(reason);
-        return;
+    let mut resolved_model = model.clone();
+    if model_changed && !model_is_auto {
+        let saved_provider_model = config
+            .provider_config_for(app.api_provider)
+            .and_then(|provider| provider.model.as_deref());
+        match resolve_route_candidate(
+            app.api_provider,
+            Some(&model),
+            saved_provider_model,
+            Some(config.deepseek_base_url()),
+        ) {
+            Ok(candidate) => {
+                resolved_model = candidate.wire_model_id.as_str().to_string();
+                app.set_active_route_limits(candidate.limits);
+            }
+            Err(reason) => {
+                app.status_message = Some(reason);
+                return;
+            }
+        }
+    } else if model_changed && model_is_auto {
+        app.active_route_limits = None;
     }
 
     if model_changed {
-        app.set_model_selection(model.clone());
-        app.provider_models
-            .insert(app.api_provider.as_str().to_string(), model.clone());
+        app.set_model_selection(resolved_model.clone());
+        app.provider_models.insert(
+            app.api_provider.as_str().to_string(),
+            resolved_model.clone(),
+        );
         app.clear_model_scoped_telemetry();
     }
     if effort_changed {
@@ -6557,9 +6577,9 @@ async fn apply_model_picker_choice(
                 app.api_provider,
                 ApiProvider::Deepseek | ApiProvider::DeepseekCN
             ) {
-                settings.set("default_model", &model)?;
+                settings.set("default_model", &resolved_model)?;
             }
-            settings.set_model_for_provider(app.api_provider.as_str(), &model);
+            settings.set_model_for_provider(app.api_provider.as_str(), &resolved_model);
         }
         if effort_changed {
             settings.set(
@@ -6574,13 +6594,19 @@ async fn apply_model_picker_choice(
     }
 
     if model_changed {
-        apply_model_and_compaction_update(engine_handle, app.compaction_config(), app.mode).await;
+        apply_model_and_compaction_update(
+            engine_handle,
+            app.compaction_config(),
+            app.mode,
+            app.active_route_limits,
+        )
+        .await;
     }
 
     let model_summary = if model_is_auto {
         "auto (per-turn model)".to_string()
     } else {
-        model.clone()
+        resolved_model.clone()
     };
     let previous_effort_summary = previous_effort.display_label_for_provider(app.api_provider);
     let effort_summary = if effort == ReasoningEffort::Auto {
@@ -6636,7 +6662,13 @@ async fn apply_picker_effort_choice(
     .err()
     .map(|err| format!(" (not persisted: {err})"));
 
-    apply_model_and_compaction_update(engine_handle, app.compaction_config(), app.mode).await;
+    apply_model_and_compaction_update(
+        engine_handle,
+        app.compaction_config(),
+        app.mode,
+        app.active_route_limits,
+    )
+    .await;
 
     let mut summary = format!(
         "Thinking: {} → {} · model {}",
@@ -6650,11 +6682,10 @@ async fn apply_picker_effort_choice(
     app.status_message = Some(summary);
 }
 
-/// Apply a `/provider` switch by mutating the in-memory config, validating
-/// that credentials exist for the new provider, then respawning the engine
-/// so the API client picks up the new base URL/key. When `model_override`
-/// is set, it replaces the active model post-switch (already normalized,
-/// will be provider-prefixed by `Config::default_model`).
+/// Apply a `/provider` switch by resolving a complete route candidate before
+/// mutating state, then respawning the engine so the API client picks up the
+/// new base URL/key. When `model_override` is set, it replaces the active
+/// model post-switch after provider-scoped normalization.
 async fn switch_provider(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -6670,38 +6701,37 @@ async fn switch_provider(
         previous_provider,
         previous_model: previous_model.clone(),
         previous_model_ids_passthrough,
+        previous_route_limits: app.active_route_limits,
         previous_config: previous_config.clone(),
         previous_onboarding: app.onboarding,
         previous_onboarding_needs_api_key: app.onboarding_needs_api_key,
         previous_api_key_env_only: app.api_key_env_only,
     });
 
-    config.provider = Some(target.as_str().to_string());
-    if matches!(target, ApiProvider::NvidiaNim)
-        && config
-            .base_url
-            .as_deref()
-            .map(|base| !base.contains("integrate.api.nvidia.com"))
-            .unwrap_or(true)
-    {
-        config.base_url = Some(DEFAULT_NVIDIA_NIM_BASE_URL.to_string());
-    }
-    if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        && config
-            .base_url
-            .as_deref()
-            .map(root_base_url_belongs_to_non_deepseek_provider)
-            .unwrap_or(false)
-    {
-        config.base_url = None;
-    }
-    if let Some(ref model) = model_override {
-        config.provider_config_for_mut(target).model = Some(model.clone());
-    }
+    let resolved_route = match resolve_runtime_route(config, target, model_override.as_deref()) {
+        Ok(route) => route,
+        Err(reason) => {
+            app.pending_provider_switch = None;
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
+                    target.as_str(),
+                    previous_provider.as_str()
+                ),
+            });
+            app.status_message = Some(format!(
+                "Route rejected before provider switch: {}.",
+                target.as_str()
+            ));
+            return;
+        }
+    };
+    let resolved_endpoint = resolved_route.candidate.endpoint.base_url.clone();
+    let next_config = resolved_route.config;
+    let new_model = resolved_route.model;
 
-    if let Err(err) = DeepSeekClient::new(config) {
+    if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
         app.pending_provider_switch = None;
-        *config = previous_config;
         app.add_message(HistoryCell::System {
             content: format!(
                 "Failed to switch provider to {}: {err}\nProvider unchanged ({}).",
@@ -6711,35 +6741,9 @@ async fn switch_provider(
         });
         return;
     }
+    *config = next_config;
 
-    let new_model = config.default_model();
-    // Validate the resolved (provider, model) tuple as one atomic unit before
-    // we tear down the engine or persist anything (#3227). This catches a
-    // contaminated route — e.g. provider `zai` paired with `deepseek-v4-pro` —
-    // locally with a precise diagnostic instead of a `400 Unknown Model`. On
-    // failure we leave the provider, model, and config exactly as they were.
-    // Pass-through routes (OpenAI-compatible, custom DeepSeek base URLs, …)
-    // skip the strict check; the upstream service is the authority there.
-    if !config.model_ids_pass_through()
-        && let Err(reason) = crate::config::validate_route(target, &new_model)
-    {
-        app.pending_provider_switch = None;
-        *config = previous_config;
-        app.add_message(HistoryCell::System {
-            content: format!(
-                "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
-                target.as_str(),
-                previous_provider.as_str()
-            ),
-        });
-        app.status_message = Some(format!(
-            "Route rejected: {} is not compatible with {}.",
-            new_model,
-            target.as_str()
-        ));
-        return;
-    }
-    let new_base_url = config.deepseek_base_url();
+    let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);
     let cache_scope_changed = previous_provider != target || previous_model != new_model;
     app.api_provider = target;
@@ -6754,6 +6758,7 @@ async fn switch_provider(
     app.model_ids_passthrough = config.model_ids_pass_through();
     app.reasoning_effort = app.reasoning_effort.normalize_for_provider(target);
     app.set_model_selection(new_model.clone());
+    app.set_active_route_limits(resolved_route.candidate.limits);
     if model_override.is_some() {
         app.provider_models
             .insert(target.as_str().to_string(), new_model.clone());
@@ -6841,31 +6846,29 @@ async fn apply_provider_fallback_switch(
     previous_provider: ApiProvider,
 ) {
     let target = app.api_provider;
-    let previous_config = config.clone();
     let previous_model = app.model.clone();
 
-    config.provider = Some(target.as_str().to_string());
-    if matches!(target, ApiProvider::NvidiaNim)
-        && config
-            .base_url
-            .as_deref()
-            .map(|base| !base.contains("integrate.api.nvidia.com"))
-            .unwrap_or(true)
-    {
-        config.base_url = Some(DEFAULT_NVIDIA_NIM_BASE_URL.to_string());
-    }
-    if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        && config
-            .base_url
-            .as_deref()
-            .map(root_base_url_belongs_to_non_deepseek_provider)
-            .unwrap_or(false)
-    {
-        config.base_url = None;
-    }
+    let resolved_route = match resolve_runtime_route(config, target, None) {
+        Ok(route) => route,
+        Err(reason) => {
+            app.api_provider = previous_provider;
+            app.last_fallback_reason = Some(format!(
+                "Fallback provider {} route was rejected: {reason}",
+                target.as_str()
+            ));
+            app.status_message = Some(format!(
+                "Fallback provider {} rejected; provider remains {}.",
+                target.as_str(),
+                previous_provider.as_str()
+            ));
+            return;
+        }
+    };
+    let resolved_endpoint = resolved_route.candidate.endpoint.base_url.clone();
+    let next_config = resolved_route.config;
+    let new_model = resolved_route.model;
 
-    if let Err(err) = DeepSeekClient::new(config) {
-        *config = previous_config;
+    if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
         app.api_provider = previous_provider;
         app.last_fallback_reason = Some(format!(
             "Fallback provider {} was unavailable: {err}",
@@ -6878,14 +6881,15 @@ async fn apply_provider_fallback_switch(
         ));
         return;
     }
+    *config = next_config;
 
-    let new_model = config.default_model();
-    let new_base_url = config.deepseek_base_url();
+    let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);
     let cache_scope_changed = previous_provider != target || previous_model != new_model;
     app.model_ids_passthrough = config.model_ids_pass_through();
     app.reasoning_effort = app.reasoning_effort.normalize_for_provider(target);
     app.set_model_selection(new_model.clone());
+    app.set_active_route_limits(resolved_route.candidate.limits);
     app.update_model_compaction_budget();
     if cache_scope_changed {
         app.clear_model_scoped_telemetry();
@@ -6932,27 +6936,6 @@ async fn apply_provider_fallback_switch(
         target.as_str(),
         new_endpoint
     ));
-}
-
-fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
-    let lower = base_url.to_ascii_lowercase();
-    [
-        "integrate.api.nvidia.com",
-        "api.openai.com",
-        "api.atlascloud.ai",
-        "maas-openapi.wanjiedata.com",
-        "volces.com",
-        "openrouter.ai",
-        "xiaomimimo.com",
-        "novita.ai",
-        "fireworks.ai",
-        "siliconflow",
-        "arcee.ai",
-        "moonshot.ai",
-        "api.kimi.com",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
 }
 
 fn display_base_url_host(base_url: &str) -> String {
@@ -7196,7 +7179,13 @@ async fn apply_command_result(
                 }
             }
             AppAction::UpdateCompaction(compaction) => {
-                apply_model_and_compaction_update(engine_handle, compaction, app.mode).await;
+                apply_model_and_compaction_update(
+                    engine_handle,
+                    compaction,
+                    app.mode,
+                    app.active_route_limits,
+                )
+                .await;
             }
             AppAction::UpdateStreamChunkTimeout(timeout_secs) => {
                 let _ = engine_handle
@@ -7251,6 +7240,7 @@ async fn apply_command_result(
                                     engine_handle,
                                     app.compaction_config(),
                                     app.mode,
+                                    app.active_route_limits,
                                 )
                                 .await;
                             }
@@ -7313,6 +7303,7 @@ async fn apply_command_result(
                     app.view_stack
                         .push(crate::tui::views::mode_picker::ModePickerView::new(
                             app.mode,
+                            app.ui_locale,
                         ));
                 }
             }
@@ -7341,6 +7332,14 @@ async fn apply_command_result(
                     let original = app.theme_id.name().to_string();
                     app.view_stack
                         .push(crate::tui::theme_picker::ThemePickerView::new(original));
+                }
+            }
+            AppAction::OpenFleetSetup => {
+                if app.view_stack.top_kind() != Some(ModalKind::FleetSetup) {
+                    app.view_stack
+                        .push(crate::tui::views::fleet_setup::FleetSetupView::new(
+                            app, config,
+                        ));
                 }
             }
             AppAction::OpenExternalUrl { url, label } => match open_external_url(&url) {
@@ -7446,6 +7445,7 @@ async fn apply_command_result(
                         app.api_provider = config.api_provider();
                         let new_model = config.default_model();
                         app.set_model_selection(new_model.clone());
+                        app.active_route_limits = None;
                         app.update_model_compaction_budget();
                         app.session.last_prompt_tokens = None;
                         app.session.last_completion_tokens = None;
@@ -7666,6 +7666,47 @@ async fn handle_mcp_ui_action(
             mcp::remove_server_config(&path, &name)
                 .map(|()| message = Some(format!("Removed MCP server '{name}'")))
         }
+        crate::tui::app::McpUiAction::Login { name, scopes } => {
+            let result = async {
+                let cfg = mcp::load_config_with_workspace(&path, &app.workspace)?;
+                let server = cfg
+                    .servers
+                    .get(&name)
+                    .ok_or_else(|| anyhow::anyhow!("MCP server '{name}' not found"))?;
+                let explicit_scopes = (!scopes.is_empty()).then_some(scopes);
+                mcp::oauth::perform_oauth_login_for_server(
+                    &name,
+                    server,
+                    explicit_scopes,
+                    config.mcp_oauth_callback_port,
+                    config.mcp_oauth_callback_url.as_deref(),
+                )
+                .await
+            }
+            .await;
+            result.map(|()| {
+                message = Some(format!(
+                    "Stored OAuth credentials for MCP server '{name}'. Restart if the server was already connected."
+                ));
+            })
+        }
+        crate::tui::app::McpUiAction::Logout { name } => {
+            let result = (|| {
+                let cfg = mcp::load_config_with_workspace(&path, &app.workspace)?;
+                let server = cfg
+                    .servers
+                    .get(&name)
+                    .ok_or_else(|| anyhow::anyhow!("MCP server '{name}' not found"))?;
+                mcp::oauth::delete_oauth_tokens_for_server(&name, server)
+            })();
+            result.map(|deleted| {
+                message = Some(if deleted {
+                    format!("Deleted stored OAuth credentials for MCP server '{name}'.")
+                } else {
+                    format!("No stored OAuth credentials found for MCP server '{name}'.")
+                });
+            })
+        }
         crate::tui::app::McpUiAction::Validate | crate::tui::app::McpUiAction::Reload => Ok(()),
     };
 
@@ -7725,6 +7766,8 @@ fn mcp_ui_action_refreshes_discovery(action: &crate::tui::app::McpUiAction) -> b
         crate::tui::app::McpUiAction::Show
             | crate::tui::app::McpUiAction::Validate
             | crate::tui::app::McpUiAction::Reload
+            | crate::tui::app::McpUiAction::Login { .. }
+            | crate::tui::app::McpUiAction::Logout { .. }
     )
 }
 
@@ -8305,6 +8348,7 @@ fn render(f: &mut Frame, app: &mut App) {
             crate::config::ApiProvider::Zai => Some("Z.ai"),
             crate::config::ApiProvider::Stepfun => Some("StepFun"),
             crate::config::ApiProvider::Minimax => Some("MiniMax"),
+            crate::config::ApiProvider::Custom => Some("Custom"),
         };
         let status_indicator_started_at = if app.low_motion {
             None
@@ -8704,6 +8748,27 @@ fn toggle_live_transcript_overlay(app: &mut App) {
     app.needs_redraw = true;
 }
 
+/// Open the `/model` picker pre-filtered to `provider` (#3083). The model
+/// picker's search already scopes rows by provider display name, so we reuse
+/// the standard "open model picker" path and seed its query by replaying the
+/// provider's display name as character input through the public view-stack
+/// key path — no model-picker internals are touched.
+fn open_model_picker_for_provider(app: &mut App, provider: crate::config::ApiProvider) {
+    if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+        app.view_stack
+            .push(crate::tui::model_picker::ModelPickerView::new(app));
+    }
+    for ch in provider.display_name().chars() {
+        // Char input updates the query and never emits a ViewEvent, so the
+        // returned (empty) event list is safe to drop.
+        let _ = app.view_stack.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        ));
+    }
+    app.needs_redraw = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_view_events(
     terminal: &mut AppTerminal,
@@ -8929,8 +8994,13 @@ async fn handle_view_events(
                 if let Some(action) = result.action {
                     match action {
                         AppAction::UpdateCompaction(compaction) => {
-                            apply_model_and_compaction_update(engine_handle, compaction, app.mode)
-                                .await;
+                            apply_model_and_compaction_update(
+                                engine_handle,
+                                compaction,
+                                app.mode,
+                                app.active_route_limits,
+                            )
+                            .await;
                         }
                         AppAction::UpdateStreamChunkTimeout(timeout_secs) => {
                             let _ = engine_handle
@@ -9046,6 +9116,9 @@ async fn handle_view_events(
                 )
                 .await;
             }
+            ViewEvent::ProviderPickerOpenModels { provider } => {
+                open_model_picker_for_provider(app, provider);
+            }
             ViewEvent::ModeSelected { mode } => {
                 let prior_mode = app.mode;
                 let msg = commands::switch_mode(app, mode);
@@ -9124,6 +9197,7 @@ fn push_approval_request_view(
         tool_input,
         approval_key,
         intent_summary,
+        &app.workspace,
     );
     app.view_stack
         .push(ApprovalView::new_for_locale(request, app.ui_locale));
@@ -9409,6 +9483,13 @@ async fn apply_provider_picker_api_key(
     if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
         config.api_key = Some(api_key);
     } else {
+        // Capture the custom entry key before borrowing `providers` (#1519).
+        let custom_key = (provider == ApiProvider::Custom).then(|| {
+            config
+                .provider
+                .clone()
+                .unwrap_or_else(|| "__custom__".to_string())
+        });
         let providers = config
             .providers
             .get_or_insert_with(ProvidersConfig::default);
@@ -9417,6 +9498,10 @@ async fn apply_provider_picker_api_key(
                 // Guarded by the outer `if` above; safety net against refactors.
                 return;
             }
+            ApiProvider::Custom => providers
+                .custom
+                .entry(custom_key.expect("custom key captured for custom provider"))
+                .or_default(),
             ApiProvider::DeepseekAnthropic => &mut providers.deepseek_anthropic,
             ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
             ApiProvider::Openai => &mut providers.openai,
@@ -9478,11 +9563,23 @@ async fn apply_provider_picker_auth_mode(
 }
 
 fn set_provider_auth_mode_in_memory(config: &mut Config, provider: ApiProvider, auth_mode: String) {
+    // Capture the custom entry key (the selected provider name) before the
+    // mutable borrow of `providers` below (#1519).
+    let custom_key = (provider == ApiProvider::Custom).then(|| {
+        config
+            .provider
+            .clone()
+            .unwrap_or_else(|| "__custom__".to_string())
+    });
     let providers = config
         .providers
         .get_or_insert_with(ProvidersConfig::default);
     let entry: &mut ProviderConfig = match provider {
         ApiProvider::Deepseek | ApiProvider::DeepseekCN => return,
+        ApiProvider::Custom => providers
+            .custom
+            .entry(custom_key.expect("custom key captured for custom provider"))
+            .or_default(),
         ApiProvider::DeepseekAnthropic => &mut providers.deepseek_anthropic,
         ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
         ApiProvider::Openai => &mut providers.openai,
@@ -9718,7 +9815,7 @@ fn pause_terminal(
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
     if use_bracketed_paste {
-        execute!(terminal.backend_mut(), DisableBracketedPaste)?;
+        disable_bracketed_paste_mode(terminal.backend_mut());
     }
     Ok(())
 }
@@ -9880,7 +9977,7 @@ pub fn emergency_restore_terminal() {
     pop_keyboard_enhancement_flags(&mut stdout);
     disable_alternate_scroll_mode(&mut stdout);
     let _ = execute!(stdout, DisableFocusChange);
-    let _ = execute!(stdout, DisableBracketedPaste);
+    disable_bracketed_paste_mode(&mut stdout);
     let _ = execute!(stdout, DisableMouseCapture);
     let _ = disable_raw_mode();
     let _ = execute!(stdout, LeaveAlternateScreen);
@@ -9943,11 +10040,27 @@ fn recover_terminal_modes<W: Write>(
     if use_mouse_capture && let Err(err) = execute!(writer, EnableMouseCapture) {
         tracing::debug!(?err, "EnableMouseCapture ignored");
     }
-    if use_bracketed_paste && let Err(err) = execute!(writer, EnableBracketedPaste) {
-        tracing::debug!(?err, "EnableBracketedPaste ignored");
+    if use_bracketed_paste {
+        try_enable_bracketed_paste_mode(writer);
     }
     if let Err(err) = execute!(writer, EnableFocusChange) {
         tracing::debug!(?err, "EnableFocusChange ignored");
+    }
+}
+
+fn try_enable_bracketed_paste_mode<W: Write>(writer: &mut W) -> bool {
+    match execute!(writer, EnableBracketedPaste) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::debug!(?err, "EnableBracketedPaste ignored");
+            false
+        }
+    }
+}
+
+fn disable_bracketed_paste_mode<W: Write>(writer: &mut W) {
+    if let Err(err) = execute!(writer, DisableBracketedPaste) {
+        tracing::debug!(?err, "DisableBracketedPaste ignored");
     }
 }
 
@@ -10182,8 +10295,11 @@ fn estimated_context_tokens(app: &App) -> Option<i64> {
 }
 
 pub(crate) fn context_usage_snapshot(app: &App) -> Option<(i64, u32, f64)> {
-    let max =
-        provider_capability(app.api_provider, app.effective_model_for_budget()).context_window;
+    let max = crate::route_budget::route_context_window_tokens(
+        app.api_provider,
+        app.effective_model_for_budget(),
+        app.active_route_limits,
+    );
     let max_i64 = i64::from(max);
     let reported = app
         .session
@@ -11027,11 +11143,11 @@ pub(crate) fn selected_detail_footer_label(app: &App) -> Option<String> {
         let noun = if matches!(cell, HistoryCell::SubAgent(_)) {
             "details"
         } else {
-            "raw"
+            "raw details"
         };
         format!(
-            " · {} {noun}",
-            key_shortcuts::tool_details_shortcut_hint_label()
+            " · {}",
+            key_shortcuts::tool_details_shortcut_action_hint(noun)
         )
     } else {
         String::new()

@@ -740,20 +740,20 @@ impl Renderable for ComposerWidget<'_> {
             };
 
             let mut block = Block::default()
-                .title(Line::from(Span::styled(
-                    if self.app.is_history_search_active() {
-                        self.app
-                            .tr(crate::localization::MessageId::HistorySearchTitle)
-                    } else if is_draft_mode {
-                        "Draft"
-                    } else {
-                        "Composer"
-                    },
-                    Style::default().fg(palette::TEXT_MUTED),
-                )))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
                 .style(background);
+            if self.app.is_history_search_active() || is_draft_mode {
+                block = block.title(Line::from(Span::styled(
+                    if self.app.is_history_search_active() {
+                        self.app
+                            .tr(crate::localization::MessageId::HistorySearchTitle)
+                    } else {
+                        "Draft"
+                    },
+                    Style::default().fg(palette::TEXT_MUTED),
+                )));
+            }
             // Top-right corner: editor state plus transient turn receipts.
             // Receipts are lifecycle chrome, not transcript content; they
             // should appear briefly without displacing conversation rows.
@@ -1384,6 +1384,17 @@ impl Renderable for ApprovalWidget<'_> {
         let options = approval_options_for(risk, locale);
 
         for (i, opt) in options.iter().enumerate() {
+            // Divider between the approve group (0-1) and the deny/abort
+            // group (2-3) so the two clusters read as distinct decisions and
+            // an approve is harder to misread as a deny. Sized to fit the
+            // minimum card inner width without wrapping.
+            if i == 2 {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  {}", "─".repeat(28)),
+                    Style::default().fg(palette::TEXT_MUTED),
+                )]));
+            }
+
             let is_selected = i == self.view.selected();
             let label_color = if opt.dangerous {
                 palette_colors.accent
@@ -1394,15 +1405,22 @@ impl Renderable for ApprovalWidget<'_> {
             let option_style = approval_option_style(is_selected, label_color);
             let shortcut_style = approval_option_style(is_selected, palette_colors.shortcut);
 
-            let spans = vec![
-                Span::raw("  "),
+            // The selected row is already painted as a highlight strip by the
+            // styles above; give it a leading caret so the action Enter will
+            // fire is unmistakable, not signalled by the background alone.
+            let lead = if is_selected {
+                Span::styled("\u{25b8} ", approval_selected_style())
+            } else {
+                Span::raw("  ")
+            };
+            lines.push(Line::from(vec![
+                lead,
                 Span::styled(
                     format!("[{}] ", opt.key_hint),
                     shortcut_style.add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(opt.label.to_string(), option_style),
-            ];
-            lines.push(Line::from(spans));
+            ]));
         }
 
         // Footer: Enter commits the highlighted row; y/a/d remain direct
@@ -2122,7 +2140,7 @@ fn composer_top_right_chrome(app: &App, area_width: u16) -> Option<Line<'static>
     if let Some(receipt) = receipt {
         let receipt_text = receipt.trim();
         if app.composer.vim_enabled {
-            let vim_label = app.composer.vim_mode.label();
+            let vim_label = app.composer.vim_mode.label_localized(app.ui_locale);
             let vim_width = UnicodeWidthStr::width(vim_label);
             let sep_width = UnicodeWidthStr::width(" · ");
             if vim_width + sep_width + 4 <= max_width {
@@ -2147,7 +2165,10 @@ fn composer_top_right_chrome(app: &App, area_width: u16) -> Option<Line<'static>
     let mut spans: Vec<Span> = Vec::new();
     if app.composer.vim_enabled {
         spans.push(Span::styled(
-            truncate_display_width(app.composer.vim_mode.label(), max_width),
+            truncate_display_width(
+                app.composer.vim_mode.label_localized(app.ui_locale),
+                max_width,
+            ),
             vim_mode_style(app.composer.vim_mode),
         ));
     }
@@ -3043,7 +3064,10 @@ mod tests {
             resume_session_id: None,
             initial_input: None,
         };
-        App::new(options, &Config::default())
+        let mut app = App::new(options, &Config::default());
+        app.ui_locale = Locale::En;
+        app.composer.vim_enabled = false;
+        app
     }
 
     fn buffer_text(buf: &Buffer, area: Rect) -> String {
@@ -3906,7 +3930,7 @@ mod tests {
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
 
-        assert!(rendered.contains("Composer"));
+        assert!(!rendered.contains("Composer"));
         assert!(rendered.contains("my-session"));
     }
 
@@ -3929,9 +3953,56 @@ mod tests {
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
 
-        assert!(rendered.contains("Composer"));
+        assert!(!rendered.contains("Composer"));
         assert!(rendered.contains("turn completed"));
         assert!(rendered.contains("tool(s) used"));
+    }
+
+    #[test]
+    fn composer_border_keeps_mode_titles_contextual() {
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 96,
+            height: 5,
+        };
+
+        let mut normal_app = create_test_app();
+        normal_app.composer_density = ComposerDensity::Comfortable;
+        let normal_widget =
+            ComposerWidget::new(&normal_app, 5, &slash_menu_entries, &mention_menu_entries);
+        let mut normal_buf = Buffer::empty(area);
+        normal_widget.render(area, &mut normal_buf);
+        let normal_rendered = buffer_text(&normal_buf, area);
+        assert!(!normal_rendered.contains("Composer"));
+        assert!(!normal_rendered.contains("Draft"));
+        assert!(
+            !normal_rendered
+                .contains(normal_app.tr(crate::localization::MessageId::HistorySearchTitle))
+        );
+
+        let mut draft_app = create_test_app();
+        draft_app.composer_density = ComposerDensity::Comfortable;
+        draft_app.insert_str("first line\nsecond line");
+        let draft_widget =
+            ComposerWidget::new(&draft_app, 5, &slash_menu_entries, &mention_menu_entries);
+        let mut draft_buf = Buffer::empty(area);
+        draft_widget.render(area, &mut draft_buf);
+        assert!(buffer_text(&draft_buf, area).contains("Draft"));
+
+        let mut search_app = create_test_app();
+        search_app.composer_density = ComposerDensity::Comfortable;
+        search_app.start_history_search();
+        let search_widget =
+            ComposerWidget::new(&search_app, 5, &slash_menu_entries, &mention_menu_entries);
+        let mut search_buf = Buffer::empty(area);
+        search_widget.render(area, &mut search_buf);
+        assert!(
+            buffer_text(&search_buf, area)
+                .contains(search_app.tr(crate::localization::MessageId::HistorySearchTitle))
+        );
     }
 
     #[test]
@@ -4528,6 +4599,33 @@ mod tests {
     }
 
     #[test]
+    fn approval_card_shows_group_divider_and_selected_caret() {
+        let request = crate::tui::approval::ApprovalRequest::new(
+            "approval-1",
+            "exec_shell",
+            "Run git commit",
+            &serde_json::json!({ "command": "git commit -m fix" }),
+            "exec_shell:git commit",
+        );
+        let view = crate::tui::approval::ApprovalView::new(request.clone());
+        let widget = ApprovalWidget::new(&request, &view);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert!(
+            rendered.contains('\u{25b8}'),
+            "selected row should show a caret:\n{rendered}"
+        );
+        assert!(
+            rendered.contains('\u{2500}'),
+            "approve and deny groups should be split by a divider:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn approval_shell_command_detects_printf_write_file_preview() {
         let request = crate::tui::approval::ApprovalRequest::new(
             "approval-1",
@@ -4570,6 +4668,7 @@ mod tests {
             }),
             "exec_shell:cargo",
             Some("Need to verify the fallback build path before editing files."),
+            std::path::Path::new("/tmp/project"),
         );
         let view = crate::tui::approval::ApprovalView::new(request.clone());
         let widget = ApprovalWidget::new(&request, &view);

@@ -747,6 +747,30 @@ fn file_ask_rule_decision_prompts_for_matching_read_path() {
 }
 
 #[test]
+fn file_ask_rule_decision_prompts_for_absolute_workspace_path() {
+    let config = EngineConfig {
+        exec_policy_engine: file_ask_rule_engine("read_file", "secrets/api_key.txt"),
+        ..EngineConfig::default()
+    };
+
+    let decision = file_tool_ask_rule_decision(
+        &config,
+        "read_file",
+        &json!({"path": "/repo/secrets/api_key.txt"}),
+        Path::new("/repo"),
+        crate::tui::approval::ApprovalMode::Auto,
+    );
+
+    assert_eq!(
+        decision,
+        Some(ToolAskRuleDecision::Prompt(
+            "Typed ask rule 'tool=read_file path=secrets/api_key.txt' requires approval."
+                .to_string()
+        ))
+    );
+}
+
+#[test]
 fn file_ask_rule_decision_blocks_matching_read_path_when_approval_is_never() {
     let config = EngineConfig {
         exec_policy_engine: file_ask_rule_engine("read_file", "secrets/api_key.txt"),
@@ -1290,6 +1314,10 @@ fn non_yolo_mode_retains_default_defer_policy() {
     ));
     assert!(!should_default_defer_tool("web_search", &always_load));
     assert!(!should_default_defer_tool("write_file", &always_load));
+    assert!(should_default_defer_tool(
+        REQUEST_USER_INPUT_NAME,
+        &always_load
+    ));
     assert!(should_default_defer_tool("task_shell_start", &always_load));
     assert!(should_default_defer_tool("task_shell_wait", &always_load));
     assert!(should_default_defer_tool("git_blame", &always_load));
@@ -1767,6 +1795,37 @@ fn model_tool_catalog_defers_non_core_native_tools_in_yolo_mode() {
 }
 
 #[test]
+fn request_user_input_stays_deferred_but_can_be_dynamically_activated() {
+    let always_load = HashSet::new();
+    let catalog = build_model_tool_catalog(
+        vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
+        Vec::new(),
+        AppMode::Agent,
+        &always_load,
+    );
+
+    assert_eq!(
+        catalog
+            .iter()
+            .find(|tool| tool.name == REQUEST_USER_INPUT_NAME)
+            .and_then(|tool| tool.defer_loading),
+        Some(true)
+    );
+
+    let mut active = initial_active_tools(&catalog);
+    assert!(!active.contains(REQUEST_USER_INPUT_NAME));
+    active.insert(REQUEST_USER_INPUT_NAME.to_string());
+
+    let active_tools = active_tools_for_step(&catalog, &active, false);
+    assert!(
+        active_tools
+            .iter()
+            .any(|tool| tool.name == REQUEST_USER_INPUT_NAME),
+        "dynamic active tools should expose the question modal without making it eager by default"
+    );
+}
+
+#[test]
 fn model_tool_catalog_sorts_each_partition_for_prefix_cache_stability() {
     // Regression for #263: deterministic byte order of the tools array is a
     // hard requirement for DeepSeek's KV prefix cache. Built-ins stay as a
@@ -2090,6 +2149,182 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
         }
     }
 
+    assert!(saw_complete);
+}
+
+#[tokio::test]
+async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
+    // #3386: a command matching a typed ask-rule (permissions.toml) must not
+    // surface an approval modal in YOLO mode, even though Yolo resolves to
+    // ApprovalMode::Auto which the execpolicy maps to OnFailure (honors
+    // ask-rules). The auto_review safety floor and typed deny rules still
+    // apply; only the ask-rule Prompt is suppressed in YOLO.
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            exec_policy_engine: ask_rule_engine("echo"),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    engine
+        .handle_run_shell_command(
+            "echo yolo-ask-rule".to_string(),
+            AppMode::Yolo,
+            true,
+            true,
+            crate::tui::approval::ApprovalMode::Auto,
+        )
+        .await;
+
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::ApprovalRequired { .. } => {
+                panic!("YOLO mode must not prompt for a typed ask-rule");
+            }
+            Event::ToolCallComplete { result, .. } => {
+                saw_complete = true;
+                let result = result.expect("shell result");
+                assert!(result.success, "{result:?}");
+                assert!(result.content.contains("yolo-ask-rule"), "{result:?}");
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_complete);
+}
+
+#[tokio::test]
+async fn yolo_mode_does_not_prompt_for_model_driven_typed_ask_rule() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-yolo\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_yolo\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
+        "\"arguments\":\"{\\\"command\\\":\\\"echo yolo-model-ask-rule\\\"}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-yolo\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("yolo-model-ask-rule"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            exec_policy_engine: ask_rule_engine("echo"),
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "please exercise the shell path".to_string(),
+            mode: AppMode::Yolo,
+            provider: None,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            show_thinking: true,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send model turn");
+
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timed out waiting for engine event")
+    {
+        match event {
+            Event::ApprovalRequired { .. } => {
+                panic!("YOLO mode must not prompt for a model-driven typed ask-rule");
+            }
+            Event::ToolCallComplete { name, result, .. } => {
+                if name == "exec_shell" {
+                    saw_complete = true;
+                    let result = result.expect("shell result");
+                    assert!(result.success, "{result:?}");
+                    assert!(result.content.contains("yolo-model-ask-rule"), "{result:?}");
+                }
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
     assert!(saw_complete);
 }
 
@@ -2560,6 +2795,7 @@ async fn set_model_reloads_instruction_sources_and_updates_session_prompt() {
         .send(Op::SetModel {
             model: "deepseek-v4-pro".to_string(),
             mode: AppMode::Agent,
+            route_limits: None,
         })
         .await
         .expect("send set model");
@@ -2797,6 +3033,42 @@ fn route_context_budget_uses_shared_budget_service() {
         crate::context_budget::PressureLevel::Critical
     );
     assert!(!budget.fits_additional(1));
+}
+
+#[test]
+fn route_context_budget_prefers_resolved_route_limits() {
+    let _lock = lock_test_env();
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(128_000),
+        input_tokens: None,
+        output_tokens: Some(32_768),
+    };
+    let budget = route_context_budget_for_route(
+        ApiProvider::Openrouter,
+        "deepseek/deepseek-v4-pro",
+        Some(limits),
+        60_000,
+    )
+    .expect("route limits should produce a budget");
+
+    assert_eq!(budget.window_tokens, 128_000);
+    assert_eq!(budget.output_cap_tokens, 32_768);
+    assert_eq!(budget.available_input_tokens, 34_208);
+}
+
+#[test]
+fn effective_max_output_tokens_for_route_caps_to_route_output_limit() {
+    let _lock = lock_test_env();
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(1_000_000),
+        input_tokens: None,
+        output_tokens: Some(8_192),
+    };
+
+    assert_eq!(
+        effective_max_output_tokens_for_route("deepseek-v4-pro", Some(limits)),
+        8_192
+    );
 }
 
 #[test]
@@ -3317,7 +3589,12 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
 }
 
 #[test]
-fn review_only_external_input_gets_read_only_policy_until_write_is_explicit() {
+fn review_only_external_input_keeps_explicit_mode_with_advisory_hint() {
+    // Review-only wording must NEVER silently override an explicitly chosen
+    // mode or strip its tools. The heuristic only activates the existing
+    // request_user_input modal tool so the model can ask focused follow-ups.
+
+    // Agent-mode request: the requested mode/tools must be preserved unchanged.
     let agent = effective_input_policy(
         UserInputProvenance::ExternalUser,
         AppMode::Agent,
@@ -3327,18 +3604,21 @@ fn review_only_external_input_gets_read_only_policy_until_write_is_explicit() {
         true,
         crate::tui::approval::ApprovalMode::Auto,
     );
-    assert_eq!(agent.mode, AppMode::Plan);
+    assert_eq!(agent.mode, AppMode::Agent);
     assert!(agent.allow_shell);
-    assert!(!agent.trust_mode);
-    assert!(!agent.auto_approve);
+    assert!(agent.trust_mode);
+    assert!(agent.auto_approve);
     assert!(matches!(
         agent.approval_mode,
-        crate::tui::approval::ApprovalMode::Suggest
+        crate::tui::approval::ApprovalMode::Auto
     ));
+    assert_eq!(agent.dynamic_active_tools, vec![REQUEST_USER_INPUT_NAME]);
     assert!(agent.status.as_deref().is_some_and(|status| {
-        status.contains("read-only Plan tools") && status.contains("explicit fix/edit/commit")
+        status.contains("keeping the current mode") && status.contains("request_user_input")
     }));
 
+    // Yolo-mode request: previously this was silently downgraded to Plan and
+    // exec_shell/write_file/etc. were stripped. It must now stay as requested.
     let yolo = effective_input_policy(
         UserInputProvenance::ExternalUser,
         AppMode::Yolo,
@@ -3348,16 +3628,17 @@ fn review_only_external_input_gets_read_only_policy_until_write_is_explicit() {
         true,
         crate::tui::approval::ApprovalMode::Auto,
     );
-    assert_eq!(yolo.mode, AppMode::Plan);
+    assert_eq!(yolo.mode, AppMode::Yolo);
     assert!(yolo.allow_shell);
-    assert!(!yolo.trust_mode);
-    assert!(!yolo.auto_approve);
+    assert!(yolo.trust_mode);
+    assert!(yolo.auto_approve);
     assert!(matches!(
         yolo.approval_mode,
-        crate::tui::approval::ApprovalMode::Suggest
+        crate::tui::approval::ApprovalMode::Auto
     ));
+    assert_eq!(yolo.dynamic_active_tools, vec![REQUEST_USER_INPUT_NAME]);
     assert!(yolo.status.as_deref().is_some_and(|status| {
-        status.contains("read-only Plan tools") && status.contains("explicit fix/edit/commit")
+        status.contains("keeping the current mode") && status.contains("request_user_input")
     }));
 
     let explicit_write = effective_input_policy(
@@ -3370,6 +3651,7 @@ fn review_only_external_input_gets_read_only_policy_until_write_is_explicit() {
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(explicit_write.mode, AppMode::Agent);
+    assert!(explicit_write.dynamic_active_tools.is_empty());
     assert!(explicit_write.status.is_none());
 }
 
@@ -3844,6 +4126,32 @@ fn tool_search_activates_discovered_deferred_tools() {
     .expect("search succeeds");
     assert!(result.success);
     assert!(active.contains("read_file"));
+}
+
+#[test]
+fn tool_search_can_discover_request_user_input_modal_tool() {
+    let always_load = HashSet::new();
+    let mut catalog = build_model_tool_catalog(
+        vec![api_tool(REQUEST_USER_INPUT_NAME)],
+        Vec::new(),
+        AppMode::Agent,
+        &always_load,
+    );
+    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+
+    let mut active = initial_active_tools(&catalog);
+    assert!(!active.contains(REQUEST_USER_INPUT_NAME));
+
+    let result = execute_tool_search(
+        TOOL_SEARCH_NAME,
+        &json!({"query":"ask user question"}),
+        &catalog,
+        &mut active,
+    )
+    .expect("search succeeds");
+
+    assert!(result.success);
+    assert!(active.contains(REQUEST_USER_INPUT_NAME));
 }
 
 fn tool_search_catalog_with_matches(count: usize) -> Vec<Tool> {

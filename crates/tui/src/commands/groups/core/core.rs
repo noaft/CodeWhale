@@ -8,6 +8,7 @@ use crate::config::{
     normalize_model_name_for_provider,
 };
 use crate::localization::{MessageId, tr};
+use crate::route_runtime::resolve_route_candidate;
 use crate::tui::app::{App, AppAction, AppMode, ReasoningEffort};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
 
@@ -128,6 +129,7 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             app.last_effective_model = None;
             app.reasoning_effort = ReasoningEffort::Auto;
             app.last_effective_reasoning_effort = None;
+            app.active_route_limits = None;
             app.update_model_compaction_budget();
             if model_changed {
                 app.clear_model_scoped_telemetry();
@@ -167,20 +169,27 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             };
             model_id
         };
-        // Reject a model that is incompatible with the active provider locally,
-        // before it can be persisted or sent and bounced as `400 Unknown Model`
-        // (#3227). The route stays atomic: provider unchanged, model unchanged.
-        // Skip the strict check when the app accepts custom model ids (a
-        // pass-through provider or a custom DeepSeek-compatible base URL), where
-        // any id is a deliberate choice and the upstream is the authority.
-        if !app.accepts_custom_model_ids()
-            && let Err(reason) = crate::config::validate_route(app.api_provider, &model_id)
-        {
-            return CommandResult::error(reason);
-        }
+        let strict_direct_custom_endpoint = app.accepts_custom_model_ids()
+            && matches!(
+                app.api_provider,
+                ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::Zai
+            );
+        let route_limits = if strict_direct_custom_endpoint {
+            None
+        } else {
+            match resolve_route_candidate(app.api_provider, Some(&model_id), None, None) {
+                Ok(candidate) => Some(candidate.limits),
+                Err(reason) => return CommandResult::error(reason),
+            }
+        };
         let old_model = app.model_display_label();
         let model_changed = app.auto_model || app.model != model_id;
         app.set_model_selection(model_id.clone());
+        if let Some(limits) = route_limits {
+            app.set_active_route_limits(limits);
+        } else {
+            app.active_route_limits = None;
+        }
         app.update_model_compaction_budget();
         if model_changed {
             app.clear_model_scoped_telemetry();
@@ -218,7 +227,7 @@ pub fn models(_app: &mut App) -> CommandResult {
     CommandResult::action(AppAction::FetchModels)
 }
 
-/// List sub-agent status from the engine
+/// List Fleet worker status from the engine.
 pub fn subagents(app: &mut App) -> CommandResult {
     if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
         let agents = subagent_view_agents(app, &app.subagent_cache);
@@ -543,7 +552,7 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
         );
     }
 
-    // Sub-agents
+    // Fleet role workers
     let subagent_count = app.subagent_cache.len();
     if subagent_count > 0 {
         let _ = writeln!(
@@ -1247,7 +1256,7 @@ mod tests {
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::SubAgents));
         assert_eq!(
             app.status_message,
-            Some("Fetching sub-agent status...".to_string())
+            Some("Fetching Fleet worker status...".to_string())
         );
     }
 
