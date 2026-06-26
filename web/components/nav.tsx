@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import type { Locale } from "@/lib/i18n/config";
 import { Seal } from "./seal";
 import { Whale } from "./whale";
@@ -10,8 +13,7 @@ const EN_LINKS = [
   { href: "/en/runtime", label: "Runtime", cn: "集成" },
   { href: "/en/docs", label: "Docs", cn: "文档" },
   { href: "/en/feed", label: "Activity", cn: "动态" },
-  /* ADDED NEW DIGEST ARCHIVE LINK HERE */
-  { href: "/en/digest", label: "Digest", cn: "摘要" },
+  { href: "/en/digest", label: "Community Digest", cn: "社区摘要" },
   { href: "/en/roadmap", label: "Roadmap", cn: "路线" },
   { href: "/en/faq", label: "FAQ", cn: "问答" },
   { href: "/en/contribute", label: "Contribute", cn: "参与" },
@@ -22,8 +24,7 @@ const ZH_LINKS = [
   { href: "/zh/runtime", label: "集成", cn: "" },
   { href: "/zh/docs", label: "文档", cn: "" },
   { href: "/zh/feed", label: "动态", cn: "" },
-  /* ADDED NEW ZH DIGEST ARCHIVE LINK HERE */
-  { href: "/zh/digest", label: "每周摘要", cn: "" },
+  { href: "/zh/digest", label: "社区摘要", cn: "" },
   { href: "/zh/roadmap", label: "路线图", cn: "" },
   { href: "/zh/faq", label: "常见问题", cn: "" },
   { href: "/zh/contribute", label: "参与贡献", cn: "" },
@@ -32,6 +33,7 @@ const ZH_LINKS = [
 export function Nav({ locale = "en" }: { locale?: Locale }) {
   const isZh = locale === "zh";
   const links = isZh ? ZH_LINKS : EN_LINKS;
+  const pathname = usePathname();
 
   return (
     <header className="hairline-b bg-paper/85 backdrop-blur sticky top-0 z-30">
@@ -65,14 +67,17 @@ export function Nav({ locale = "en" }: { locale?: Locale }) {
         </Link>
 
         <nav className="hidden md:flex items-center gap-7">
-          {links.map((l) => (
-            <Link key={l.href} href={l.href} className="nav-link group">
-              <span>{l.label}</span>
-              {!isZh && "cn" in l && l.cn && (
-                <span className="font-cjk text-[0.66rem] ml-1.5 text-ink-mute">{l.cn}</span>
-              )}
-            </Link>
-          ))}
+          {links.map((l) => {
+            const isActive = pathname === l.href || pathname.startsWith(`${l.href}/`);
+            return (
+              <Link key={l.href} href={l.href} className="nav-link group" aria-current={isActive ? "page" : undefined}>
+                <span>{l.label}</span>
+                {!isZh && "cn" in l && l.cn && (
+                  <span className="font-cjk text-[0.66rem] ml-1.5 text-ink-mute">{l.cn}</span>
+                )}
+              </Link>
+            );
+          })}
         </nav>
 
         <div className="flex items-center gap-2 sm:gap-3">
