@@ -4,6 +4,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
+use tokio::io::AsyncBufReadExt;
 
 fn test_http_client() -> reqwest::Client {
     let _ = rustls::crypto::ring::default_provider().install_default();
